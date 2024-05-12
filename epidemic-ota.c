@@ -12,15 +12,15 @@
 #include "dev/flash.h"
 #include "dev/rom-util.h"
 #include "dev/watchdog.h"
+
 /*----------------------------------------------------------------Defines----*/
 
 #define DEBUG DEBUG_PRINT
 #include "net/ip/uip-debug.h"
 
-#define TEST_CLIENT 0
+#define TEST_CLIENT 1
 
 #define UDP_PORT 1234
-#define SERVICE_ID 190
 
 #if TSCH_TIME_SYNCH
 #include "net/mac/4emac/4emac-private.h"
@@ -39,8 +39,18 @@ static enum device_state ota_process_state = STATE_REQUEST;
 static uint8_t ota_cell_num = 0;
 // current updating device list
 static uip_ipaddr_t updating_device_list[MAX_OTA_CELL];
+// current ota info
+static struct current_ota current_ota_info;
 
 /*--------------------------------------------------------------Functions----*/
+
+// FLASH OPERATIONS
+unsigned int ota_arch_flash_addr();
+unsigned int ota_arch_flash_size();
+void ota_arch_erase(unsigned int addr, unsigned int size);
+void ota_arch_write(const void *buf, unsigned int addr, unsigned int size);
+void ota_arch_read(void *buf, unsigned int flash_addr, unsigned int size);
+void ota_arch_init();
 
 // print a buffer as hexadecimals
 void printBufferHex(uint8_t *buffer, uint16_t len)
@@ -67,22 +77,31 @@ void print_packet_status(struct ota_packet *p)
     PRINTF("PRINT_PACKET_STATUS: Packet Status: \n");
 
     PRINTF("PRINT_PACKET_STATUS: p->msg_type: %02X\n", p->msg_type);
-    if (p->msg_type == OTA_REQUEST || p->msg_type == OTA_RESPONSE)
-        PRINTF("PRINT_PACKET_STATUS: p->fw_version: %ld\n", p->fw_version);
+    PRINTF("PRINT_PACKET_STATUS: p->fw_version: %ld\n", p->fw_version);
+
     if (p->msg_type == OTA_RESPONSE)
         PRINTF("PRINT_PACKET_STATUS: p->fw_size: %d\n", p->fw_size);
-    if (p->msg_type == OTA_RESPONSE)
-        PRINTF("PRINT_PACKET_STATUS: p->fw_total_fragment_num: %d\n", p->fw_total_fragment_num);
+    if (p->msg_type == OTA_RESPONSE || p->msg_type == OTA_PACKET_REQUEST || p->msg_type == OTA_DATA_PACKET)
+        PRINTF("PRINT_PACKET_STATUS: p->fw_fragment_num: %d\n", p->fw_fragment_num);
     if (p->msg_type == OTA_RESPONSE)
         PRINTF("PRINT_PACKET_STATUS: p->fw_fragment_size: %d\n", p->fw_fragment_size);
-    if (p->msg_type == OTA_DATA_PACKET)
+    if (p->msg_type == OTA_DATA_PACKET || p->msg_type == OTA_RESPONSE)
         PRINTF("PRINT_PACKET_STATUS: p->data->len: %d\n", p->data.len);
-    if (p->msg_type == OTA_DATA_PACKET)
+    if (p->msg_type == OTA_DATA_PACKET || p->msg_type == OTA_RESPONSE)
         PRINTF("PRINT_PACKET_STATUS: p->data->buf:\n");
-    if (p->msg_type == OTA_DATA_PACKET)
+    if (p->msg_type == OTA_DATA_PACKET || p->msg_type == OTA_RESPONSE)
         printBufferHex(p->data.buf, p->data.len);
 
     PRINTF("\n\n");
+}
+
+void print_current_ota_packet_status(struct current_ota *p)
+{
+    PRINTF("PRINT_CURRENT_OTA_PACKET_STATUS: p->fw_version: %ld\n", p->fw_version);
+    PRINTF("PRINT_CURRENT_OTA_PACKET_STATUS: p->crc: %ld\n", p->crc);
+    PRINTF("PRINT_CURRENT_OTA_PACKET_STATUS: p->fw_size: %d\n", p->fw_size);
+    PRINTF("PRINT_CURRENT_OTA_PACKET_STATUS: p->fw_fragment_num: %d\n", p->fw_fragment_num);
+    PRINTF("PRINT_CURRENT_OTA_PACKET_STATUS: p->fw_fragment_size: %d\n", p->fw_fragment_size);
 }
 
 // print current device state
@@ -153,7 +172,7 @@ uint8_t check_updating_device_list(uip_ipaddr_t *ipaddr)
     return 1;
 }
 
-// create a request content buffer
+// create a request content buffer (add msg type and firmware version only)
 uint8_t prepare_ota_request_packet(struct ota_packet *p, uint8_t msg_type)
 {
     // create a buf and
@@ -176,7 +195,7 @@ uint8_t prepare_ota_request_packet(struct ota_packet *p, uint8_t msg_type)
     return 0;
 }
 
-// create a response content buffer
+// create a response content buffer (add msg type, firmware version, firmware size, firmware fragment number, firmware fragment size and crc(in the ota data field) only)
 uint8_t prepare_ota_response_packet(struct ota_packet *p, uint8_t msg_type)
 {
     PRINTF("PREPARE_OTA_RESPONSE_PACKET: preparing RESPONSE packet.\n");
@@ -184,19 +203,24 @@ uint8_t prepare_ota_response_packet(struct ota_packet *p, uint8_t msg_type)
     p->msg_type = msg_type;
     p->fw_version = get_firmware_version();
     p->fw_size = get_firmware_size();
-    p->fw_total_fragment_num = (get_firmware_size() / OTA_MAX_DATA_SIZE);
+    p->fw_fragment_num = (get_firmware_size() / OTA_MAX_DATA_SIZE);
     p->fw_fragment_size = OTA_MAX_DATA_SIZE;
+
+    // TODO: crc will get calculated crc, for now just gets a number
+    uint32_t crc = 1;
+    p->data.len = sizeof(crc);
+    memcpy(p->data.buf, &crc, p->data.len);
 
     print_packet_status(p);
 
-    if (!p->msg_type || !p->fw_version || !p->fw_size || !p->fw_total_fragment_num || !p->fw_fragment_size)
+    if (p->msg_type && p->fw_version && p->fw_size && p->fw_fragment_num && p->fw_fragment_size && p->data.len)
     {
-        PRINTF("PREPARE_OTA_RESPONSE_PACKET: Preparing RESPONSE packet is failed!\n");
-        return 0;
+        PRINTF("PREPARE_OTA_RESPONSE_PACKET: Preparing RESPONSE packet is successful.\n");
+        return 1;
     }
 
-    PRINTF("PREPARE_OTA_RESPONSE_PACKET: Preparing RESPONSE packet is successful.\n");
-    return 1;
+    PRINTF("PREPARE_OTA_RESPONSE_PACKET: Preparing RESPONSE packet is failed!\n");
+    return 0;
 }
 
 // create a packet request content buffer
@@ -267,29 +291,20 @@ uint8_t create_ota_packet(uint8_t *buf, uint8_t len, struct ota_packet *p)
         return 0;
     }
 
-    if (p->msg_type == OTA_REQUEST || p->msg_type == OTA_RESPONSE)
+    // add firmware version to packet
+    if ((len - cur_len) >= sizeof(uint32_t))
     {
-        PRINTF("CREATE_OTA_PACKET: msg type is OTA_REQUEST or OTA_RESPONSE. Adding fw version to packet.\n");
-        // add firmware version to packet
-        if ((len - cur_len) >= sizeof(uint32_t))
-        {
-            memcpy(&buf[cur_len], &p->fw_version, sizeof(uint32_t));
-            cur_len += sizeof(uint32_t);
-        }
-        else
-        {
-            PRINTF("CREATE_OTA_PACKET: Firmware version cannot added packet!\n");
-            return 0;
-        }
+        memcpy(&buf[cur_len], &p->fw_version, sizeof(uint32_t));
+        cur_len += sizeof(uint32_t);
     }
     else
     {
-        PRINTF("CREATE_OTA_PACKET: msg type is NOT OTA_REQUEST or OTA_RESPONSE. fw version cannot added to packet.\n");
+        PRINTF("CREATE_OTA_PACKET: Firmware version cannot added packet!\n");
+        return 0;
     }
 
     if (p->msg_type == OTA_RESPONSE)
     {
-        PRINTF("CREATE_OTA_PACKET: msg type is OTA_REQUEST or OTA_RESPONSE. Adding fw size to packet.\n");
         // add firmware size to packet
         if ((len - cur_len) >= sizeof(uint16_t))
         {
@@ -302,18 +317,13 @@ uint8_t create_ota_packet(uint8_t *buf, uint8_t len, struct ota_packet *p)
             return 0;
         }
     }
-    else
-    {
-        PRINTF("CREATE_OTA_PACKET: msg type is NOT OTA_RESPONSE. fw size cannot added to packet.\n");
-    }
 
-    if (p->msg_type == OTA_RESPONSE)
+    if (p->msg_type == OTA_RESPONSE || p->msg_type == OTA_PACKET_REQUEST || p->msg_type == OTA_DATA_PACKET)
     {
-        PRINTF("CREATE_OTA_PACKET: msg type is OTA_RESPONSE. Adding fw total fragment number to packet.\n");
         // add firmware's total fragment number to packet
         if ((len - cur_len) >= 1)
         {
-            buf[cur_len] = p->fw_total_fragment_num;
+            buf[cur_len] = p->fw_fragment_num;
             cur_len++;
         }
         else
@@ -321,10 +331,6 @@ uint8_t create_ota_packet(uint8_t *buf, uint8_t len, struct ota_packet *p)
             PRINTF("CREATE_OTA_PACKET: Firmware's total fragment number cannot added packet!\n");
             return 0;
         }
-    }
-    else
-    {
-        PRINTF("CREATE_OTA_PACKET: msg type is NOT OTA_RESPONSE. fw total fragment number cannot added to packet.\n");
     }
 
     if (p->msg_type == OTA_RESPONSE)
@@ -342,13 +348,9 @@ uint8_t create_ota_packet(uint8_t *buf, uint8_t len, struct ota_packet *p)
             return 0;
         }
     }
-    else
-    {
-        PRINTF("CREATE_OTA_PACKET: msg type is OTA_RESPONSE. fw fragment size cannot added to packet.\n");
-    }
 
     // TODO: devam edilecek.
-    if (p->msg_type == OTA_DATA_PACKET)
+    if (p->msg_type == OTA_DATA_PACKET || p->msg_type == OTA_RESPONSE)
     {
         // add firmware data len to packet
         if ((len - cur_len) >= 1)
@@ -363,7 +365,7 @@ uint8_t create_ota_packet(uint8_t *buf, uint8_t len, struct ota_packet *p)
         }
     }
 
-    if (p->msg_type == OTA_DATA_PACKET)
+    if (p->msg_type == OTA_DATA_PACKET || p->msg_type == OTA_RESPONSE)
     {
         // add firmware data to packet
         if ((len - cur_len) >= p->data.len)
@@ -408,7 +410,7 @@ static struct ota_packet ota_parse_buf(uint8_t *buf, uint16_t len)
 
     if ((len - cur_len) >= 1)
     {
-        p.fw_total_fragment_num = buf[cur_len];
+        p.fw_fragment_num = buf[cur_len];
         cur_len++;
     }
 
@@ -472,7 +474,7 @@ udp_callback(struct simple_udp_connection *c,
                 if (buf_len > 0)
                 {
                     PRINTF("Packet is created. Sending to ");
-                    PRINT6ADDR(parent_ip_address);
+                    PRINT6ADDR(sender_addr);
                     PRINTF("\n");
 
                     // send packet
@@ -488,25 +490,28 @@ udp_callback(struct simple_udp_connection *c,
 
     case OTA_RESPONSE:
         PRINTF("UDP_CALLBACK: Incoming packet type is OTA_RESPONSE.\n");
-        if (prepare_ota_packet(&packet_to_send, OTA_PACKET_REQUEST))
+        uint8_t is_ota_info_correct = incoming_packet.fw_size / incoming_packet.fw_fragment_size == incoming_packet.fw_fragment_num ? 1 : 0;
+        if (!compare_firmware_version(incoming_packet.fw_version) && is_ota_info_correct && ota_process_state == STATE_REQUEST)
         {
-            buf_len = create_ota_packet(buf_to_send, MAX_PACKET_SIZE, &packet_to_send);
-            if (buf_len > 0)
-            {
-                PRINTF("Packet is created. Sending to ");
-                PRINT6ADDR(parent_ip_address);
-                PRINTF("\n");
+            current_ota_info.fw_version = incoming_packet.fw_version;
+            current_ota_info.fw_fragment_size = incoming_packet.fw_fragment_size;
+            current_ota_info.fw_size = incoming_packet.fw_size;
+            current_ota_info.fw_fragment_num = incoming_packet.fw_fragment_num;
+            current_ota_info.crc = (uint32_t)incoming_packet.data.buf[0];
 
-                // send packet
-                simple_udp_sendto(c, buf_to_send, buf_len, sender_addr);
+            print_current_ota_packet_status(&current_ota_info);
 
-                ota_process_state = STATE_UPDATE_CLIENT;
-            }
+            ota_process_state = STATE_UPDATE_CLIENT;
+        }
+        else
+        {
+            PRINTF("UDP_CALLBACK: incoming ota info is not correct!\n");
         }
         break;
 
     case OTA_PACKET_REQUEST:
         PRINTF("UDP_CALLBACK: Incoming packet type is OTA_PACKET_REQUEST.\n");
+
         break;
 
     case OTA_DATA_PACKET:
@@ -548,6 +553,7 @@ PROCESS_THREAD(request_process, ev, data)
         PROCESS_WAIT_UNTIL(etimer_expired(&et_identify));
         etimer_set(&et_identify, AUTHENTICATION_INTERVAL * CLOCK_SECOND);
         PRINTF("REQUEST_PROCESS: Waiting for synch...\n");
+        watchdog_periodic();
     }
 
     // after the synchronization, get parent from default instance and get it's IP address.
@@ -555,7 +561,7 @@ PROCESS_THREAD(request_process, ev, data)
     parent_ip_address = rpl_get_parent_ipaddr(parent);
 
     // set the UDP connection with port UDP_PORT, check if the connection is available, if not, exit from process.
-    if (!simple_udp_register(&udp_conn, UIP_HTONS(UDP_PORT), NULL, UIP_HTONS(UDP_PORT), udp_callback))
+    if (!simple_udp_register(&udp_conn, UDP_PORT, NULL, UDP_PORT, udp_callback))
     {
         PRINTF("REQUEST_PROCESS: UDP Connection Error!\n");
         PROCESS_EXIT();
@@ -578,16 +584,17 @@ PROCESS_THREAD(request_process, ev, data)
                 // if packed is prepared, init a buffer of size ota packet and fill it with packet data, control if packet created, if not dont send packet
                 if (buf_len > 0)
                 {
-
                     PRINTF("CREATE_OTA_PACKET: Packet created. Packet is: \n");
                     printBufferHex(udp_buf, buf_len);
                     PRINTF("\n");
                     PRINTF("Packet is created with %d size. Sending to ", buf_len);
-                    PRINT6ADDR(parent_ip_address);
+                    PRINT6ADDR(rpl_get_parent_ipaddr(default_instance->current_dag->preferred_parent));
                     PRINTF("\n");
 
+                    PRINTF("1\n");
                     // send packet
-                    simple_udp_sendto(&udp_conn, udp_buf, buf_len, parent_ip_address);
+                    simple_udp_sendto(&udp_conn, udp_buf, buf_len + 1, rpl_get_parent_ipaddr(default_instance->current_dag->preferred_parent));
+                    PRINTF("2\n");
                 }
                 else
                     PRINTF("REQUEST_PROCESS: packet cannot created!\n");
@@ -602,7 +609,7 @@ PROCESS_THREAD(request_process, ev, data)
         // if ota_process_state is STATE_UPDATE_CLIENT or STATE_UPDATE_SERVER, don't do anything, just wait until ota process ends.
         else if (ota_process_state == STATE_UPDATE_CLIENT || ota_process_state == STATE_UPDATE_SERVER)
         {
-            etimer_stop(&et_request);
+            // etimer_stop(&et_request);
             PRINTF("REQUEST_PROCESS: Device ota_process_state is %02X. So waiting for ota_process_state changing...\n", ota_process_state);
             process_start(&update_process, NULL);
             PROCESS_WAIT_EVENT_UNTIL(ota_process_state == STATE_REQUEST);
@@ -611,7 +618,6 @@ PROCESS_THREAD(request_process, ev, data)
         else
         {
             PRINTF("REQUEST_PROCESS: Unsupported state for request process!\n");
-            PROCESS_YIELD();
         }
     }
 
@@ -623,16 +629,28 @@ PROCESS_THREAD(request_process, ev, data)
 PROCESS_THREAD(update_process, ev, data)
 {
     static struct etimer et_update;
-    static int counter_update = 0;
+    // static struct ota_packet p;
 
     PROCESS_BEGIN();
     PROCESS_PAUSE();
 
-    etimer_set(&et_update, 3 * CLOCK_SECOND);
+    etimer_set(&et_update, PACKET_REQUEST_INTERVAL * CLOCK_SECOND);
     while (1)
     {
+        if (ota_process_state == STATE_UPDATE_CLIENT)
+        {
+        }
+        else if (ota_process_state == STATE_UPDATE_SERVER)
+        {
+            // wait for incoming requests
+        }
+        else
+        {
+            // unsupported state, wait or reset device?
+        }
+
         PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et_update));
-        PRINTF("Hello World %d FROM UPDATE PROCESS\n", counter_update++);
+        PRINTF("Hello World FROM UPDATE PROCESS\n");
         etimer_reset(&et_update);
     }
 

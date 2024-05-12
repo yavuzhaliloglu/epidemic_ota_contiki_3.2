@@ -2,7 +2,7 @@
 #define EPIDEMIC_OTA_H_
 
 // time interval to send request message
-#define REQUEST_SEND_INTERVAL 60
+#define REQUEST_SEND_INTERVAL 5
 // max data size for OTA data
 #define OTA_MAX_DATA_SIZE 64
 // enable time synch
@@ -11,6 +11,10 @@
 #define AUTHENTICATION_INTERVAL 3
 // max number of nodes that a node can update
 #define MAX_OTA_CELL 1
+// packet request interval time
+#define PACKET_REQUEST_INTERVAL 10
+// crc size
+#define CRC_SIZE 32
 
 // ota message types
 enum ota_message_types
@@ -42,11 +46,20 @@ struct ota_packet
     uint8_t msg_type;
     uint32_t fw_version;
     uint16_t fw_size;
-    uint8_t fw_total_fragment_num;
+    uint8_t fw_fragment_num;
     uint8_t fw_fragment_size;
     struct ota_data data;
 };
 
-#define MAX_PACKET_SIZE sizeof(struct ota_packet)
+struct current_ota
+{
+    uint32_t fw_version;
+    uint32_t crc;
+    uint16_t fw_size;
+    uint8_t fw_fragment_num;
+    uint8_t fw_fragment_size;
+};
+
+#define MAX_PACKET_SIZE 80
 
 #endif
