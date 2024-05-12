@@ -45,21 +45,21 @@ struct ota_packet
 {
     uint8_t msg_type;
     uint32_t fw_version;
-    uint16_t fw_size;
-    uint8_t fw_fragment_num;
+    uint32_t fw_size;
+    uint16_t fw_fragment_num;
     uint8_t fw_fragment_size;
     struct ota_data data;
 };
 
-struct current_ota
+struct ota_info
 {
     uint32_t fw_version;
     uint32_t crc;
-    uint16_t fw_size;
-    uint8_t fw_fragment_num;
+    uint32_t fw_size;
+    uint16_t fw_fragment_num;
     uint8_t fw_fragment_size;
 };
 
-#define MAX_PACKET_SIZE 80
+#define MAX_PACKET_SIZE sizeof(struct ota_packet)
 
 #endif

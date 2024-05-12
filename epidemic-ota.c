@@ -18,7 +18,7 @@
 #define DEBUG DEBUG_PRINT
 #include "net/ip/uip-debug.h"
 
-#define TEST_CLIENT 1
+#define TEST_CLIENT 0
 
 #define UDP_PORT 1234
 
@@ -40,7 +40,9 @@ static uint8_t ota_cell_num = 0;
 // current updating device list
 static uip_ipaddr_t updating_device_list[MAX_OTA_CELL];
 // current ota info
-static struct current_ota current_ota_info;
+static struct ota_info current_ota_info;
+// last ota info
+static struct ota_info last_ota_info;
 
 /*--------------------------------------------------------------Functions----*/
 
@@ -80,7 +82,7 @@ void print_packet_status(struct ota_packet *p)
     PRINTF("PRINT_PACKET_STATUS: p->fw_version: %ld\n", p->fw_version);
 
     if (p->msg_type == OTA_RESPONSE)
-        PRINTF("PRINT_PACKET_STATUS: p->fw_size: %d\n", p->fw_size);
+        PRINTF("PRINT_PACKET_STATUS: p->fw_size: %ld\n", p->fw_size);
     if (p->msg_type == OTA_RESPONSE || p->msg_type == OTA_PACKET_REQUEST || p->msg_type == OTA_DATA_PACKET)
         PRINTF("PRINT_PACKET_STATUS: p->fw_fragment_num: %d\n", p->fw_fragment_num);
     if (p->msg_type == OTA_RESPONSE)
@@ -95,13 +97,13 @@ void print_packet_status(struct ota_packet *p)
     PRINTF("\n\n");
 }
 
-void print_current_ota_packet_status(struct current_ota *p)
+void print_ota_info_packet_status(struct ota_info *p)
 {
-    PRINTF("PRINT_CURRENT_OTA_PACKET_STATUS: p->fw_version: %ld\n", p->fw_version);
-    PRINTF("PRINT_CURRENT_OTA_PACKET_STATUS: p->crc: %ld\n", p->crc);
-    PRINTF("PRINT_CURRENT_OTA_PACKET_STATUS: p->fw_size: %d\n", p->fw_size);
-    PRINTF("PRINT_CURRENT_OTA_PACKET_STATUS: p->fw_fragment_num: %d\n", p->fw_fragment_num);
-    PRINTF("PRINT_CURRENT_OTA_PACKET_STATUS: p->fw_fragment_size: %d\n", p->fw_fragment_size);
+    PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->fw_version: %ld\n", p->fw_version);
+    PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->crc: %ld\n", p->crc);
+    PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->fw_size: %ld\n", p->fw_size);
+    PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->fw_fragment_num: %d\n", p->fw_fragment_num);
+    PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->fw_fragment_size: %d\n", p->fw_fragment_size);
 }
 
 // print current device state
@@ -125,22 +127,14 @@ void get_device_state(enum device_state state)
     }
 }
 
-// get this program's firmware version.
-// TODO: DÜZENLENECEK, FLASH BELLEKTEKI FIRMWARE VERSIYONUNU ALACAK.
 uint32_t get_firmware_version()
 {
-#if TEST_CLIENT
-    return 1;
-#else
-    return 2;
-#endif
+    return last_ota_info.fw_version;
 }
 
-// get this program's firmware size.
-// TODO: DÜZENLENECEK, FLASH BELLEKTEKI FIRMWARE SIZE'I ALACAK.
 uint16_t get_firmware_size()
 {
-    return 128;
+    return last_ota_info.fw_size;
 }
 
 // compare this firmware version with given firmware version, if this firmware version is newer return 1, if older or equal return 0
@@ -206,8 +200,7 @@ uint8_t prepare_ota_response_packet(struct ota_packet *p, uint8_t msg_type)
     p->fw_fragment_num = (get_firmware_size() / OTA_MAX_DATA_SIZE);
     p->fw_fragment_size = OTA_MAX_DATA_SIZE;
 
-    // TODO: crc will get calculated crc, for now just gets a number
-    uint32_t crc = 1;
+    uint32_t crc = last_ota_info.crc;
     p->data.len = sizeof(crc);
     memcpy(p->data.buf, &crc, p->data.len);
 
@@ -306,10 +299,10 @@ uint8_t create_ota_packet(uint8_t *buf, uint8_t len, struct ota_packet *p)
     if (p->msg_type == OTA_RESPONSE)
     {
         // add firmware size to packet
-        if ((len - cur_len) >= sizeof(uint16_t))
+        if ((len - cur_len) >= sizeof(uint32_t))
         {
-            memcpy(&buf[cur_len], &p->fw_size, sizeof(uint16_t));
-            cur_len += sizeof(uint16_t);
+            memcpy(&buf[cur_len], &p->fw_size, sizeof(uint32_t));
+            cur_len += sizeof(uint32_t);
         }
         else
         {
@@ -321,10 +314,10 @@ uint8_t create_ota_packet(uint8_t *buf, uint8_t len, struct ota_packet *p)
     if (p->msg_type == OTA_RESPONSE || p->msg_type == OTA_PACKET_REQUEST || p->msg_type == OTA_DATA_PACKET)
     {
         // add firmware's total fragment number to packet
-        if ((len - cur_len) >= 1)
+        if ((len - cur_len) >= sizeof(uint16_t))
         {
-            buf[cur_len] = p->fw_fragment_num;
-            cur_len++;
+            memcpy(&buf[cur_len], &p->fw_fragment_num, sizeof(uint16_t));
+            cur_len += sizeof(uint16_t);
         }
         else
         {
@@ -349,7 +342,6 @@ uint8_t create_ota_packet(uint8_t *buf, uint8_t len, struct ota_packet *p)
         }
     }
 
-    // TODO: devam edilecek.
     if (p->msg_type == OTA_DATA_PACKET || p->msg_type == OTA_RESPONSE)
     {
         // add firmware data len to packet
@@ -401,17 +393,17 @@ static struct ota_packet ota_parse_buf(uint8_t *buf, uint16_t len)
         cur_len += sizeof(uint32_t);
     }
 
-    if ((len - cur_len) >= sizeof(uint16_t))
+    if ((len - cur_len) >= sizeof(uint32_t))
     {
-        memcpy(&p.fw_size, &buf[cur_len], sizeof(uint16_t));
+        memcpy(&p.fw_size, &buf[cur_len], sizeof(uint32_t));
         // p.fw_size = reverse_bits_uint16_t(p.fw_size);
-        cur_len += sizeof(uint16_t);
+        cur_len += sizeof(uint32_t);
     }
 
-    if ((len - cur_len) >= 1)
+    if ((len - cur_len) >= sizeof(uint16_t))
     {
-        p.fw_fragment_num = buf[cur_len];
-        cur_len++;
+        memcpy(&p.fw_fragment_num, &buf[cur_len], sizeof(uint16_t));
+        cur_len += sizeof(uint16_t);
     }
 
     if ((len - cur_len) >= 1)
@@ -430,6 +422,47 @@ static struct ota_packet ota_parse_buf(uint8_t *buf, uint16_t len)
     {
         memcpy(&p.data.buf, &buf[cur_len], p.data.len);
         cur_len += p.data.len;
+    }
+
+    return p;
+}
+
+static struct ota_info ota_parse_info_buf(uint8_t *buf, uint16_t len)
+{
+    uint16_t cur_len = 0;
+    struct ota_info p;
+
+    if ((len - cur_len) >= sizeof(uint32_t))
+    {
+        memcpy(&p.fw_version, &buf[cur_len], sizeof(uint32_t));
+        // p.fw_version = reverse_bits_uint32_t(p.fw_version);
+        cur_len += sizeof(uint32_t);
+    }
+
+    if ((len - cur_len) >= sizeof(uint32_t))
+    {
+        memcpy(&p.crc, &buf[cur_len], sizeof(uint32_t));
+        // p.fw_size = reverse_bits_uint16_t(p.fw_size);
+        cur_len += sizeof(uint32_t);
+    }
+
+    if ((len - cur_len) >= sizeof(uint32_t))
+    {
+        memcpy(&p.fw_size, &buf[cur_len], sizeof(uint32_t));
+        // p.fw_size = reverse_bits_uint16_t(p.fw_size);
+        cur_len += sizeof(uint32_t);
+    }
+
+    if ((len - cur_len) >= sizeof(uint16_t))
+    {
+        memcpy(&p.fw_fragment_num, &buf[cur_len], sizeof(uint16_t));
+        cur_len += sizeof(uint16_t);
+    }
+
+    if ((len - cur_len) >= 1)
+    {
+        p.fw_fragment_size = buf[cur_len];
+        cur_len++;
     }
 
     return p;
@@ -499,7 +532,7 @@ udp_callback(struct simple_udp_connection *c,
             current_ota_info.fw_fragment_num = incoming_packet.fw_fragment_num;
             current_ota_info.crc = (uint32_t)incoming_packet.data.buf[0];
 
-            print_current_ota_packet_status(&current_ota_info);
+            print_ota_info_packet_status(&current_ota_info);
 
             ota_process_state = STATE_UPDATE_CLIENT;
         }
@@ -528,6 +561,98 @@ udp_callback(struct simple_udp_connection *c,
 
 PROCESS(request_process, "Epidemic Routing Request Process");
 PROCESS(update_process, "Epidemic Routing Update Process");
+PROCESS(test_flash_process, "Flash Process For Testing");
+/*----------------------------------------------------------Thread(Flash)----*/
+
+PROCESS_THREAD(test_flash_process, ev, data)
+{
+    static int flash_addr;
+    static int flash_size;
+    static struct ota_info ota_info_flash;
+    static uint8_t ota_area_buf[256];
+    static uint8_t ota_write_buf[256];
+    static uint8_t ota_data[128];
+    uint8_t cur_len;
+
+    PROCESS_BEGIN();
+
+    for (uint8_t i = 0; i < 128; i++)
+    {
+        ota_data[i] = i;
+        watchdog_periodic();
+    }
+
+    flash_addr = ota_arch_flash_addr();
+    flash_size = ota_arch_flash_size();
+
+    PRINTF("TEST_FLASH_PROCESS: start addr 0x%x\n", flash_addr);
+    PRINTF("TEST_FLASH_PROCESS: flash size %u\n", flash_size);
+    PRINTF("TEST_FLASH_PROCESS: OTA data:\n");
+    printBufferHex(ota_data, 128);
+    PRINTF("\n");
+
+    ota_arch_erase(flash_addr, 256);
+    ota_arch_read(ota_area_buf, flash_addr, 256);
+
+    PRINTF("TEST_FLASH_PROCESS: OTA area buffer before write operation:\n");
+    printBufferHex(ota_area_buf, 256);
+    PRINTF("\n");
+
+#if TEST_CLIENT
+    ota_info_flash.fw_version = 1;
+    ota_info_flash.crc = 1;
+    ota_info_flash.fw_size = sizeof(ota_data);
+    ota_info_flash.fw_fragment_num = ota_info_flash.fw_size / OTA_MAX_DATA_SIZE;
+    ota_info_flash.fw_fragment_size = OTA_MAX_DATA_SIZE;
+#else
+    ota_info_flash.fw_version = 2;
+    ota_info_flash.crc = 1;
+    ota_info_flash.fw_size = sizeof(ota_data);
+    ota_info_flash.fw_fragment_num = ota_info_flash.fw_size / OTA_MAX_DATA_SIZE;
+    ota_info_flash.fw_fragment_size = OTA_MAX_DATA_SIZE;
+#endif
+
+    cur_len = 0;
+
+    memcpy(&ota_write_buf[cur_len], &ota_info_flash.fw_version, sizeof(uint32_t));
+    cur_len += sizeof(uint32_t);
+
+    memcpy(&ota_write_buf[cur_len], &ota_info_flash.crc, sizeof(uint32_t));
+    cur_len += sizeof(uint32_t);
+
+    memcpy(&ota_write_buf[cur_len], &ota_info_flash.fw_size, sizeof(uint32_t));
+    cur_len += sizeof(uint32_t);
+
+    memcpy(&ota_write_buf[cur_len],&ota_info_flash.fw_fragment_num,sizeof(uint16_t));
+    cur_len += sizeof(uint16_t);
+
+    ota_write_buf[cur_len] = ota_info_flash.fw_fragment_size;
+    cur_len++;
+
+    print_ota_info_packet_status(&ota_info_flash);
+
+    ota_arch_write(ota_write_buf, flash_addr, cur_len);
+    ota_arch_read(ota_area_buf, flash_addr, 256);
+
+    PRINTF("TEST_FLASH_PROCESS: OTA area buffer after write operation:\n");
+    printBufferHex(ota_area_buf, 256);
+    PRINTF("\n");
+
+    last_ota_info = ota_parse_info_buf(ota_area_buf, 256);
+    PRINTF("TEST_FLASH_PROCESS: OTA info packet status:\n");
+    print_ota_info_packet_status(&last_ota_info);
+
+    ota_arch_write(ota_data, flash_addr + FLASH_PAGE_SIZE, 128);
+    ota_arch_read(ota_area_buf, flash_addr + FLASH_PAGE_SIZE, 128);
+
+    PRINTF("TEST_FLASH_PROCESS: OTA area buffer OTA DATA:\n");
+    printBufferHex(ota_area_buf, 128);
+    PRINTF("\n");
+
+    process_start(&request_process, NULL);
+
+    PROCESS_END();
+}
 
 /*--------------------------------------------------------Thread(Request)----*/
 
@@ -660,6 +785,6 @@ PROCESS_THREAD(update_process, ev, data)
 /*-------------------------------------------------------------------Init----*/
 void start_epidemic_ota()
 {
-    process_exit(&request_process);
-    process_start(&request_process, NULL);
+    process_exit(&test_flash_process);
+    process_start(&test_flash_process, NULL);
 }
