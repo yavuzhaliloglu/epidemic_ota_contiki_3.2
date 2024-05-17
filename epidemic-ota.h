@@ -43,6 +43,7 @@ struct ota_data
 // ota packet struct, holds message type, message len and message itself
 struct ota_packet
 {
+    // uip_ipaddr_t sender_ip_addr;
     uint8_t msg_type;
     uint32_t fw_version;
     uint32_t fw_size;
@@ -60,6 +61,7 @@ struct ota_info
     uint8_t fw_fragment_size;
 };
 
-#define MAX_PACKET_SIZE sizeof(struct ota_packet)
+#define PACKET_SIZE sizeof(struct ota_packet)
+#define OTA_INFO_PACKET_SIZE sizeof(struct ota_info)
 
 #endif

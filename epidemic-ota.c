@@ -18,9 +18,12 @@
 #define DEBUG DEBUG_PRINT
 #include "net/ip/uip-debug.h"
 
-#define TEST_CLIENT 0
+#define TEST_CLIENT 1
 
 #define UDP_PORT 1234
+#define FLASH_OTA_INFO_ADDR OTA_SYS_ADDR
+#define FLASH_OTA_BITMAP_ADDR OTA_SYS_ADDR + FLASH_PAGE_SIZE
+#define FLASH_OTA_DATA_ADDR OTA_SYS_ADDR + (2 * FLASH_PAGE_SIZE)
 
 #if TSCH_TIME_SYNCH
 #include "net/mac/4emac/4emac-private.h"
@@ -55,7 +58,7 @@ void ota_arch_read(void *buf, unsigned int flash_addr, unsigned int size);
 void ota_arch_init();
 
 // print a buffer as hexadecimals
-void printBufferHex(uint8_t *buffer, uint16_t len)
+static void printBufferHex(uint8_t *buffer, uint16_t len)
 {
     if (DEBUG)
     {
@@ -74,7 +77,7 @@ void printBufferHex(uint8_t *buffer, uint16_t len)
 }
 
 // print packet status
-void print_packet_status(struct ota_packet *p)
+static void print_packet_status(struct ota_packet *p)
 {
     PRINTF("PRINT_PACKET_STATUS: Packet Status: \n");
 
@@ -97,7 +100,7 @@ void print_packet_status(struct ota_packet *p)
     PRINTF("\n\n");
 }
 
-void print_ota_info_packet_status(struct ota_info *p)
+static void print_ota_info_packet_status(struct ota_info *p)
 {
     PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->fw_version: %ld\n", p->fw_version);
     PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->crc: %ld\n", p->crc);
@@ -106,39 +109,111 @@ void print_ota_info_packet_status(struct ota_info *p)
     PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->fw_fragment_size: %d\n", p->fw_fragment_size);
 }
 
-// print current device state
-void get_device_state(enum device_state state)
+// // print current device state
+// static void get_device_state(enum device_state state)
+// {
+//     PRINTF("GET_DEVICE_STATE: Device State is: ");
+//     switch (state)
+//     {
+//     case STATE_REQUEST:
+//         PRINTF("STATE_REQUEST\n");
+//         break;
+//     case STATE_UPDATE_CLIENT:
+//         PRINTF("STATE_UPDATE_CLIENT\n");
+//         break;
+//     case STATE_UPDATE_SERVER:
+//         PRINTF("STATE_UPDATE_SERVER\n");
+//         break;
+//     default:
+//         PRINTF("State ERROR!\n");
+//         break;
+//     }
+// }
+
+static uint8_t reverseBits(uint8_t byte)
 {
-    PRINTF("GET_DEVICE_STATE: Device State is: ");
-    switch (state)
+    uint8_t reversed = 0;
+    for (int i = 0; i < 8; i++)
     {
-    case STATE_REQUEST:
-        PRINTF("STATE_REQUEST\n");
-        break;
-    case STATE_UPDATE_CLIENT:
-        PRINTF("STATE_UPDATE_CLIENT\n");
-        break;
-    case STATE_UPDATE_SERVER:
-        PRINTF("STATE_UPDATE_SERVER\n");
-        break;
-    default:
-        PRINTF("State ERROR!\n");
-        break;
+        if (byte & (1 << i))
+        {
+            reversed |= 1 << (7 - i);
+        }
     }
+    return reversed;
 }
 
-uint32_t get_firmware_version()
+static int8_t findZeroBit(uint8_t byte)
+{
+    for (uint8_t i = 7; i >= 0; i--)
+    {
+        if (((byte >> i) & 1) == 0)
+        {
+            return 7 - i; // Found a 0 bit
+        }
+    }
+    return -1; // No 0 bit found
+}
+
+static uint16_t find_packet_number()
+{
+    uint8_t bitmap_word_buf[FLASH_WORD_SIZE];
+    uint16_t current_ota_bitmap_length = current_ota_info.fw_fragment_num;
+    uint16_t word_index = 0;
+    uint8_t byte_index = 0;
+    uint8_t bit_index = 0;
+    uint16_t packet_num = 0;
+    uint8_t bit_found_flag = 0;
+
+    while (word_index <= (current_ota_bitmap_length / 4))
+    {
+        ota_arch_read(bitmap_word_buf, FLASH_OTA_BITMAP_ADDR + (word_index * FLASH_WORD_SIZE), FLASH_WORD_SIZE);
+
+        PRINTF("FIND_PACKET_NUMBER: read bitmap_word_buf is: ");
+        printBufferHex(bitmap_word_buf, FLASH_WORD_SIZE);
+        PRINTF("\n");
+
+        for (uint8_t byte_num = 0; byte_num < FLASH_WORD_SIZE; byte_num++)
+        {
+            bit_index = findZeroBit(bitmap_word_buf[byte_num]);
+
+            if (bit_index >= 0)
+            {
+                byte_index = byte_num;
+                bit_found_flag = 1;
+                break;
+            }
+
+            watchdog_periodic();
+        }
+        
+        if (bit_found_flag)
+        {
+            break;
+        }
+        
+        word_index++;
+        watchdog_periodic();
+    }
+
+    PRINTF("PREPARE_OTA_PACKET_REQUEST_PACKET: Bitmap 0 Found in index -> %d.Word, %d.Byte, %d.Bit\n", word_index, byte_index, bit_index);
+    packet_num = (word_index * FLASH_WORD_SIZE * 8) + (byte_index * 8) + bit_index;
+
+    return packet_num;
+}
+
+static uint32_t get_firmware_version()
 {
     return last_ota_info.fw_version;
 }
 
-uint16_t get_firmware_size()
+static uint16_t get_firmware_size()
 {
     return last_ota_info.fw_size;
 }
 
 // compare this firmware version with given firmware version, if this firmware version is newer return 1, if older or equal return 0
-uint8_t compare_firmware_version(uint32_t fw_version)
+static uint8_t compare_firmware_version(uint32_t fw_version)
 {
     if (get_firmware_version() > fw_version)
     {
@@ -152,7 +227,7 @@ uint8_t compare_firmware_version(uint32_t fw_version)
     }
 }
 
-uint8_t check_updating_device_list(uip_ipaddr_t *ipaddr)
+static uint8_t check_updating_device_list(uip_ipaddr_t *ipaddr)
 {
     for (uint8_t i = 0; i < MAX_OTA_CELL; i++)
     {
@@ -163,11 +238,12 @@ uint8_t check_updating_device_list(uip_ipaddr_t *ipaddr)
         }
     }
     PRINTF("CHECK_UPDATING_DEVICE_LIST: This device is not updating. Adding update list.\n");
+    // TODO: ADD TO THE LIST BUT HOW TO DELETE?
     return 1;
 }
 
 // create a request content buffer (add msg type and firmware version only)
-uint8_t prepare_ota_request_packet(struct ota_packet *p, uint8_t msg_type)
+static uint8_t prepare_ota_request_packet(struct ota_packet *p, uint8_t msg_type)
 {
     // create a buf and
     // uint8_t buf[OTA_MAX_DATA_SIZE];
@@ -190,7 +266,7 @@ uint8_t prepare_ota_request_packet(struct ota_packet *p, uint8_t msg_type)
 }
 
 // create a response content buffer (add msg type, firmware version, firmware size, firmware fragment number, firmware fragment size and crc(in the ota data field) only)
-uint8_t prepare_ota_response_packet(struct ota_packet *p, uint8_t msg_type)
+static uint8_t prepare_ota_response_packet(struct ota_packet *p, uint8_t msg_type)
 {
     PRINTF("PREPARE_OTA_RESPONSE_PACKET: preparing RESPONSE packet.\n");
 
@@ -217,9 +293,26 @@ uint8_t prepare_ota_response_packet(struct ota_packet *p, uint8_t msg_type)
 }
 
 // create a packet request content buffer
-uint8_t prepare_ota_packet_request_packet(struct ota_packet *p, uint8_t msg_type)
+static uint8_t prepare_ota_packet_request_packet(struct ota_packet *p, uint8_t msg_type)
 {
-    return 1;
+    uint16_t packet_num = find_packet_number();
+
+    p->msg_type = msg_type;
+    p->fw_version = get_firmware_version();
+    p->fw_fragment_num = packet_num;
+
+    print_packet_status(p);
+
+    if (p->msg_type && p->fw_version && p->fw_fragment_num >= 0 && p->fw_fragment_num <= current_ota_info.fw_fragment_num)
+    {
+        PRINTF("PREPARE_OTA_PACKET_REQUEST_PACKET: Packet Created Successfully.\n");
+        return 1;
+    }
+    else
+    {
+        PRINTF("PREPARE_OTA_PACKET_REQUEST_PACKET: Packet CANNOT created!\n");
+        return 0;
+    }
 }
 
 // create a data packet content buffer
@@ -267,7 +360,7 @@ static uint8_t prepare_ota_packet(struct ota_packet *p, uint8_t msg_type)
 }
 
 // create packet, transfer packet data into given buffer, it returns 0 if the preparing packet is failed, returns 1 if preparing packet is successful
-uint8_t create_ota_packet(uint8_t *buf, uint8_t len, struct ota_packet *p)
+static uint8_t create_ota_packet(uint8_t *buf, uint8_t len, struct ota_packet *p)
 {
     uint8_t cur_len = 0;
     print_packet_status(p);
@@ -375,6 +468,71 @@ uint8_t create_ota_packet(uint8_t *buf, uint8_t len, struct ota_packet *p)
     return cur_len;
 }
 
+// creates a buffer that contains ota info packet data
+static uint8_t create_ota_info_buffer(uint8_t *buf, uint8_t len, struct ota_info *p)
+{
+    uint8_t cur_len = 0;
+
+    if ((len - cur_len) >= sizeof(uint32_t))
+    {
+        memcpy(&buf[cur_len], &p->fw_version, sizeof(uint32_t));
+        cur_len += sizeof(uint32_t);
+    }
+    else
+    {
+        PRINTF("CREATE_OTA_INFO_PACKET: Firmware version cannot added packet!\n");
+        return 0;
+    }
+
+    if ((len - cur_len) >= sizeof(uint32_t))
+    {
+        memcpy(&buf[cur_len], &p->crc, sizeof(uint32_t));
+        cur_len += sizeof(uint32_t);
+    }
+    else
+    {
+        PRINTF("CREATE_OTA_INFO_PACKET: Firmware CRC cannot added packet!\n");
+        return 0;
+    }
+
+    if ((len - cur_len) >= sizeof(uint32_t))
+    {
+        memcpy(&buf[cur_len], &p->fw_size, sizeof(uint32_t));
+        cur_len += sizeof(uint32_t);
+    }
+    else
+    {
+        PRINTF("CREATE_OTA_INFO_PACKET: Firmware Size cannot added packet!\n");
+        return 0;
+    }
+
+    if ((len - cur_len) >= sizeof(uint16_t))
+    {
+        memcpy(&buf[cur_len], &p->fw_fragment_num, sizeof(uint16_t));
+        cur_len += sizeof(uint16_t);
+    }
+    else
+    {
+        PRINTF("CREATE_OTA_INFO_PACKET: Firmware fragment number cannot added packet!\n");
+        return 0;
+    }
+
+    if ((len - cur_len) >= 1)
+    {
+        buf[cur_len] = p->fw_fragment_size;
+        cur_len++;
+    }
+    else
+    {
+        PRINTF("CREATE_OTA_INFO_PACKET: Firmware fragment size cannot added packet!\n");
+        return 0;
+    }
+
+    print_ota_info_packet_status(p);
+
+    return cur_len;
+}
+
 static struct ota_packet ota_parse_buf(uint8_t *buf, uint16_t len)
 {
     uint16_t cur_len = 0;
@@ -435,21 +593,18 @@ static struct ota_info ota_parse_info_buf(uint8_t *buf, uint16_t len)
     if ((len - cur_len) >= sizeof(uint32_t))
     {
         memcpy(&p.fw_version, &buf[cur_len], sizeof(uint32_t));
-        // p.fw_version = reverse_bits_uint32_t(p.fw_version);
         cur_len += sizeof(uint32_t);
     }
 
     if ((len - cur_len) >= sizeof(uint32_t))
     {
         memcpy(&p.crc, &buf[cur_len], sizeof(uint32_t));
-        // p.fw_size = reverse_bits_uint16_t(p.fw_size);
         cur_len += sizeof(uint32_t);
     }
 
     if ((len - cur_len) >= sizeof(uint32_t))
     {
         memcpy(&p.fw_size, &buf[cur_len], sizeof(uint32_t));
-        // p.fw_size = reverse_bits_uint16_t(p.fw_size);
         cur_len += sizeof(uint32_t);
     }
 
@@ -466,6 +621,57 @@ static struct ota_info ota_parse_info_buf(uint8_t *buf, uint16_t len)
     }
 
     return p;
+}
+
+static void write_ota_info_to_flash(struct ota_info *p)
+{
+    uint8_t ota_info_buffer[OTA_INFO_PACKET_SIZE];
+    uint8_t response_len = create_ota_info_buffer(ota_info_buffer, OTA_INFO_PACKET_SIZE, p);
+
+    PRINTF("WRITE_OTA_INFO_TO_FLASH: OTA info to write flash is:\n");
+    printBufferHex(ota_info_buffer, response_len);
+    PRINTF("\n");
+
+    ota_arch_write(ota_info_buffer, FLASH_OTA_INFO_ADDR, response_len);
+}
+
+static void create_ota_bitmap(uint16_t fw_fragment_num)
+{
+    uint16_t ota_bitmap_byte_size = fw_fragment_num / 8;
+    uint8_t ota_bitmap_remaining_bit_size = fw_fragment_num % 8;
+
+    PRINTF("CREATE_OTA_BITMAP: ota_bitmap_byte_size is: %d\n", ota_bitmap_byte_size);
+    PRINTF("CREATE_OTA_BITMAP: ota_bitmap_remaining_bit_size is: %d\n", ota_bitmap_remaining_bit_size);
+
+    uint8_t fragment_number_buffer[ota_bitmap_byte_size + 1];
+    uint16_t current_buffer_len = 0;
+    uint8_t last_byte_of_ota_bitmap = 0xff;
+
+    for (current_buffer_len = 0; current_buffer_len < ota_bitmap_byte_size; current_buffer_len++)
+    {
+        fragment_number_buffer[current_buffer_len] = 0;
+        watchdog_periodic();
+    }
+
+    PRINTF("CREATE_OTA_BITMAP: current_buffer_len is: %d\n", current_buffer_len);
+
+    if (ota_bitmap_remaining_bit_size != 0 || current_buffer_len == 0)
+    {
+        fragment_number_buffer[current_buffer_len] = reverseBits(last_byte_of_ota_bitmap << ota_bitmap_remaining_bit_size);
+
+        if (current_buffer_len == 0)
+            current_buffer_len++;
+    }
+    else
+    {
+        fragment_number_buffer[current_buffer_len] = last_byte_of_ota_bitmap;
+    }
+    PRINTF("BITMAP IS:\n");
+    printBufferHex(fragment_number_buffer, current_buffer_len);
+    PRINTF("\n");
+
+    ota_arch_erase(FLASH_OTA_BITMAP_ADDR, FLASH_PAGE_SIZE);
+    ota_arch_write(fragment_number_buffer, FLASH_OTA_BITMAP_ADDR, current_buffer_len);
 }
 
 // UDP connection callback handler
@@ -487,7 +693,7 @@ udp_callback(struct simple_udp_connection *c,
 
     struct ota_packet incoming_packet = ota_parse_buf((uint8_t *)data, datalen);
     struct ota_packet packet_to_send;
-    uint8_t buf_to_send[MAX_PACKET_SIZE];
+    uint8_t buf_to_send[PACKET_SIZE];
     uint8_t buf_len = 0;
 
     print_packet_status(&incoming_packet);
@@ -503,7 +709,7 @@ udp_callback(struct simple_udp_connection *c,
 
             if (prepare_ota_packet(&packet_to_send, OTA_RESPONSE))
             {
-                buf_len = create_ota_packet(buf_to_send, MAX_PACKET_SIZE, &packet_to_send);
+                buf_len = create_ota_packet(buf_to_send, PACKET_SIZE, &packet_to_send);
                 if (buf_len > 0)
                 {
                     PRINTF("Packet is created. Sending to ");
@@ -533,6 +739,22 @@ udp_callback(struct simple_udp_connection *c,
             current_ota_info.crc = (uint32_t)incoming_packet.data.buf[0];
 
             print_ota_info_packet_status(&current_ota_info);
+
+            write_ota_info_to_flash(&current_ota_info);
+            create_ota_bitmap(current_ota_info.fw_fragment_num);
+
+            uint8_t buf_info[64];
+            uint8_t buf_bitmap[64];
+            ota_arch_read(buf_info, FLASH_OTA_INFO_ADDR, 64);
+            ota_arch_read(buf_bitmap, FLASH_OTA_BITMAP_ADDR, 64);
+
+            PRINTF("OTA_INFO AREA BUFFER CONTENT:\n");
+            printBufferHex(buf_info, 64);
+            PRINTF("\n");
+
+            PRINTF("OTA_BITMAP AREA BUFFER CONTENT:\n");
+            printBufferHex(buf_bitmap, 64);
+            PRINTF("\n");
 
             ota_process_state = STATE_UPDATE_CLIENT;
         }
@@ -570,9 +792,9 @@ PROCESS_THREAD(test_flash_process, ev, data)
     static int flash_size;
     static struct ota_info ota_info_flash;
     static uint8_t ota_area_buf[256];
-    static uint8_t ota_write_buf[256];
+    static uint8_t ota_info_buf[256];
     static uint8_t ota_data[128];
-    uint8_t cur_len;
+    static uint8_t cur_len;
 
     PROCESS_BEGIN();
 
@@ -593,7 +815,6 @@ PROCESS_THREAD(test_flash_process, ev, data)
 
     ota_arch_erase(flash_addr, 256);
     ota_arch_read(ota_area_buf, flash_addr, 256);
-
     PRINTF("TEST_FLASH_PROCESS: OTA area buffer before write operation:\n");
     printBufferHex(ota_area_buf, 256);
     PRINTF("\n");
@@ -612,26 +833,9 @@ PROCESS_THREAD(test_flash_process, ev, data)
     ota_info_flash.fw_fragment_size = OTA_MAX_DATA_SIZE;
 #endif
 
-    cur_len = 0;
+    cur_len = create_ota_info_buffer(ota_info_buf, sizeof(struct ota_info), &ota_info_flash);
 
-    memcpy(&ota_write_buf[cur_len], &ota_info_flash.fw_version, sizeof(uint32_t));
-    cur_len += sizeof(uint32_t);
-
-    memcpy(&ota_write_buf[cur_len], &ota_info_flash.crc, sizeof(uint32_t));
-    cur_len += sizeof(uint32_t);
-
-    memcpy(&ota_write_buf[cur_len], &ota_info_flash.fw_size, sizeof(uint32_t));
-    cur_len += sizeof(uint32_t);
-
-    memcpy(&ota_write_buf[cur_len],&ota_info_flash.fw_fragment_num,sizeof(uint16_t));
-    cur_len += sizeof(uint16_t);
-
-    ota_write_buf[cur_len] = ota_info_flash.fw_fragment_size;
-    cur_len++;
-
-    print_ota_info_packet_status(&ota_info_flash);
-
-    ota_arch_write(ota_write_buf, flash_addr, cur_len);
+    ota_arch_write(ota_info_buf, flash_addr, cur_len);
     ota_arch_read(ota_area_buf, flash_addr, 256);
 
     PRINTF("TEST_FLASH_PROCESS: OTA area buffer after write operation:\n");
@@ -642,11 +846,13 @@ PROCESS_THREAD(test_flash_process, ev, data)
     PRINTF("TEST_FLASH_PROCESS: OTA info packet status:\n");
     print_ota_info_packet_status(&last_ota_info);
 
+#if !TEST_CLIENT
     ota_arch_write(ota_data, flash_addr + FLASH_PAGE_SIZE, 128);
-    ota_arch_read(ota_area_buf, flash_addr + FLASH_PAGE_SIZE, 128);
+#endif
+    ota_arch_read(ota_area_buf, flash_addr + FLASH_PAGE_SIZE, 256);
 
     PRINTF("TEST_FLASH_PROCESS: OTA area buffer OTA DATA:\n");
-    printBufferHex(ota_area_buf, 128);
+    printBufferHex(ota_area_buf, 256);
     PRINTF("\n");
 
     process_start(&request_process, NULL);
@@ -665,7 +871,7 @@ PROCESS_THREAD(request_process, ev, data)
     // init an ota packet
     static struct ota_packet p;
     // get size of ota packet
-    static uint8_t udp_buf[MAX_PACKET_SIZE];
+    static uint8_t udp_buf[PACKET_SIZE];
     // buffer len for outgoing packet
     static uint8_t buf_len = 0;
 
@@ -693,7 +899,8 @@ PROCESS_THREAD(request_process, ev, data)
     }
 
     // PRINT DEBUG FOR TEST
-    PRINTF("REQUEST_PROCESS: MAX_PACKET_SIZE is: %d\n", MAX_PACKET_SIZE);
+    PRINTF("REQUEST_PROCESS: PACKET_SIZE is: %d\n", PACKET_SIZE);
+    PRINTF("REQUEST_PROCESS: OTA_INFO_PACKET_SIZE is: %d\n", OTA_INFO_PACKET_SIZE);
 
     // set the request timer
     etimer_set(&et_request, REQUEST_SEND_INTERVAL * CLOCK_SECOND);
@@ -705,7 +912,7 @@ PROCESS_THREAD(request_process, ev, data)
             // prepare request message, control if packet is prepared, if not, dont send packet
             if (prepare_ota_packet(&p, OTA_REQUEST))
             {
-                buf_len = create_ota_packet(udp_buf, MAX_PACKET_SIZE, &p);
+                buf_len = create_ota_packet(udp_buf, PACKET_SIZE, &p);
                 // if packed is prepared, init a buffer of size ota packet and fill it with packet data, control if packet created, if not dont send packet
                 if (buf_len > 0)
                 {
@@ -716,10 +923,8 @@ PROCESS_THREAD(request_process, ev, data)
                     PRINT6ADDR(rpl_get_parent_ipaddr(default_instance->current_dag->preferred_parent));
                     PRINTF("\n");
 
-                    PRINTF("1\n");
                     // send packet
                     simple_udp_sendto(&udp_conn, udp_buf, buf_len + 1, rpl_get_parent_ipaddr(default_instance->current_dag->preferred_parent));
-                    PRINTF("2\n");
                 }
                 else
                     PRINTF("REQUEST_PROCESS: packet cannot created!\n");
@@ -754,7 +959,7 @@ PROCESS_THREAD(request_process, ev, data)
 PROCESS_THREAD(update_process, ev, data)
 {
     static struct etimer et_update;
-    // static struct ota_packet p;
+    static struct ota_packet p;
 
     PROCESS_BEGIN();
     PROCESS_PAUSE();
@@ -764,10 +969,12 @@ PROCESS_THREAD(update_process, ev, data)
     {
         if (ota_process_state == STATE_UPDATE_CLIENT)
         {
+            if (prepare_ota_packet(&p, OTA_PACKET_REQUEST))
+            {
+            }
         }
         else if (ota_process_state == STATE_UPDATE_SERVER)
         {
-            // wait for incoming requests
         }
         else
         {
