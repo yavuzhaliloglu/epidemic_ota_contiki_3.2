@@ -186,12 +186,12 @@ static uint16_t find_packet_number()
 
             watchdog_periodic();
         }
-        
+
         if (bit_found_flag)
         {
             break;
         }
-        
+
         word_index++;
         watchdog_periodic();
     }
@@ -674,6 +674,31 @@ static void create_ota_bitmap(uint16_t fw_fragment_num)
     ota_arch_write(fragment_number_buffer, FLASH_OTA_BITMAP_ADDR, current_buffer_len);
 }
 
+static void send_packet_request(struct ota_packet *p)
+{
+    uint8_t buf[PACKET_SIZE];
+    uint8_t buf_len = 0;
+
+    buf_len = create_ota_packet(buf, PACKET_SIZE, p);
+
+    if (buf_len > 0)
+    {
+        PRINTF("UPDATE_PROCESS: Packet created. Packet is: \n");
+        printBufferHex(buf, buf_len);
+        PRINTF("\n");
+        PRINTF("UPDATE_PROCESS: Packet is created with %d size. Sending to ", buf_len);
+        PRINT6ADDR(rpl_get_parent_ipaddr(default_instance->current_dag->preferred_parent));
+        PRINTF("\n");
+
+        // send packet
+        simple_udp_sendto(&udp_conn, buf, buf_len, rpl_get_parent_ipaddr(default_instance->current_dag->preferred_parent));
+    }
+    else
+    {
+        PRINTF("UPDATE_PROCESS: Packet cannot created!\n");
+    }
+}
+
 // UDP connection callback handler
 static void
 udp_callback(struct simple_udp_connection *c,
@@ -916,10 +941,10 @@ PROCESS_THREAD(request_process, ev, data)
                 // if packed is prepared, init a buffer of size ota packet and fill it with packet data, control if packet created, if not dont send packet
                 if (buf_len > 0)
                 {
-                    PRINTF("CREATE_OTA_PACKET: Packet created. Packet is: \n");
+                    PRINTF("REQUEST_PROCESS: Packet created. Packet is: \n");
                     printBufferHex(udp_buf, buf_len);
                     PRINTF("\n");
-                    PRINTF("Packet is created with %d size. Sending to ", buf_len);
+                    PRINTF("REQUEST_PROCESS: Packet is created with %d size. Sending to ", buf_len);
                     PRINT6ADDR(rpl_get_parent_ipaddr(default_instance->current_dag->preferred_parent));
                     PRINTF("\n");
 
@@ -971,6 +996,7 @@ PROCESS_THREAD(update_process, ev, data)
         {
             if (prepare_ota_packet(&p, OTA_PACKET_REQUEST))
             {
+                send_packet_request(&p);
             }
         }
         else if (ota_process_state == STATE_UPDATE_SERVER)
@@ -982,7 +1008,6 @@ PROCESS_THREAD(update_process, ev, data)
         }
 
         PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et_update));
-        PRINTF("Hello World FROM UPDATE PROCESS\n");
         etimer_reset(&et_update);
     }
 
