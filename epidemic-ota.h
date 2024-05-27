@@ -2,17 +2,19 @@
 #define EPIDEMIC_OTA_H_
 
 // time interval to send request message
-#define REQUEST_SEND_INTERVAL 5
+#define REQUEST_SEND_INTERVAL 15
+//packet request waiting time threshold
+#define PACKET_REQUEST_THRESHOLD 45
 // max data size for OTA data
 #define OTA_MAX_DATA_SIZE 64
 // enable time synch
 #define TSCH_TIME_SYNCH 1
 // authenticate interval time
-#define AUTHENTICATION_INTERVAL 3
+#define AUTHENTICATION_INTERVAL 10
 // max number of nodes that a node can update
 #define MAX_OTA_CELL 1
 // packet request interval time
-#define PACKET_REQUEST_INTERVAL 10
+#define PACKET_REQUEST_INTERVAL 15
 // crc size
 #define CRC_SIZE 32
 
