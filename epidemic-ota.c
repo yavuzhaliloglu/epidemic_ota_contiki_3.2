@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "epidemic-ota.h"
 
 #include "net/ip/uip.h"
 #include "net/ipv6/uip-ds6.h"
@@ -17,6 +16,7 @@
 #include "dev/flash.h"
 #include "dev/rom-util.h"
 #include "dev/watchdog.h"
+#include "epidemic-ota.h"
 
 /*----------------------------------------------------------------Defines----*/
 
@@ -175,16 +175,10 @@ static int8_t findZeroBit(uint8_t byte)
     return -1; // No 0 bit found
 }
 
-static void setBit(uint8_t *word, uint8_t index)
+static void setBit(uint8_t *word, uint16_t index)
 {
-    if (index < 0 || index > 31)
-    {
-        PRINTF("SETBIT: Invalid bit index!\n");
-        return;
-    }
-
-    int byteIndex = index / 8;
-    int bitIndex = index % 8;
+    uint8_t byteIndex = index / 8;
+    uint8_t bitIndex = index % 8;
 
     uint8_t mask = 1 << (7 - bitIndex);
 
@@ -200,6 +194,20 @@ static void get_firmware_data(uint8_t *buf, uint16_t fragnum, uint8_t fragsize)
     PRINTF("SEND_FIRMWARE_PACKET: data read from flash. Read data is:\n");
     printBufferHex(buf, fragsize);
     PRINTF("\n");
+}
+
+// Function to add an IP address to the list
+void add_ip_to_list(uip_ipaddr_t *list, uip_ipaddr_t *new_ip, uint8_t *list_size)
+{
+    if (*list_size < MAX_OTA_CELL)
+    {
+        list[*list_size] = *new_ip;
+        (*list_size)++;
+    }
+    else
+    {
+        printf("IP address list is full!\n");
+    }
 }
 
 static uint16_t find_packet_number(struct ota_info *p)
@@ -243,7 +251,7 @@ static uint16_t find_packet_number(struct ota_info *p)
         watchdog_periodic();
     }
 
-    PRINTF("PREPARE_OTA_PACKET_REQUEST_PACKET: Bitmap 0 Found in index -> %d.Word, %d.Byte, %d.Bit\n", word_index, byte_index, bit_index);
+    PRINTF("FIND_PACKET_NUMBER: Bitmap 0 Found in index -> %d.Word, %d.Byte, %d.Bit\n", word_index, byte_index, bit_index);
     packet_num = (word_index * FLASH_WORD_SIZE * 8) + (byte_index * 8) + bit_index;
 
     return packet_num;
@@ -289,26 +297,74 @@ static uint8_t compare_firmware_version(uint32_t fw_version)
     }
 }
 
+// returns 1 if ipaddr is not in the list, returns 0 if ipaddr is in the list
 static uint8_t check_updating_device_list(uip_ipaddr_t *ipaddr)
 {
-    for (uint8_t i = 0; i < MAX_OTA_CELL; i++)
+    uint8_t list_idx = 0;
+
+    while (list_idx < MAX_OTA_CELL)
     {
-        if (uip_ip6addr_cmp(&updating_device_list[i], ipaddr))
+        if (uip_ip6addr_cmp(&updating_device_list[list_idx], ipaddr))
         {
             PRINTF("CHECK_UPDATING_DEVICE_LIST: This device is already in updating list!\n");
             return 0;
         }
+
+        list_idx++;
     }
+
+    list_idx--;
+
     PRINTF("CHECK_UPDATING_DEVICE_LIST: This device is not updating. Adding update list.\n");
     // TODO: ADD TO THE LIST BUT HOW TO DELETE?
+    add_ip_to_list(updating_device_list, ipaddr, &list_idx);
+
     return 1;
 }
 
+static void clear_updating_device_list()
+{
+    uint8_t lst_idx = 0;
+
+    for (lst_idx = 0; lst_idx < MAX_OTA_CELL; lst_idx++)
+    {
+        uip_create_unspecified(&updating_device_list[lst_idx]);
+    }
+
+    PRINTF("CLEAR_UPDATING_DEVICE_LIST: All entries have been cleared.\n");
+}
+
+static uint8_t remove_ipaddr_from_updating_device_list(uip_ipaddr_t *ipaddr)
+{
+    uint8_t lst_idx = 0;
+
+    while (lst_idx < MAX_OTA_CELL)
+    {
+        if (uip_ip6addr_cmp(&updating_device_list[lst_idx], ipaddr))
+        {
+            PRINTF("REMOVE_IPADDR_FROM_UPDATING_DEVICE_LIST: This address is in updating list!\n");
+
+            // Move the last element to the current position
+            if (lst_idx != MAX_OTA_CELL - 1)
+            {
+                updating_device_list[lst_idx] = updating_device_list[MAX_OTA_CELL - 1];
+            }
+
+            // Clear the last element (optional but recommended)
+            uip_create_unspecified(&updating_device_list[MAX_OTA_CELL - 1]);
+
+            PRINTF("REMOVE_IPADDR_FROM_UPDATING_DEVICE_LIST: removing process completed.\n");
+            return 1;
+        }
+        lst_idx++;
+    }
+
+    PRINTF("REMOVE_IPADDR_FROM_UPDATING_DEVICE_LIST: This address cannot be found in the updating list!\n");
+    return 0;
+}
 // create a request content buffer (add msg type and firmware version only)
 static uint8_t prepare_ota_request_packet(struct ota_packet *p, uint8_t msg_type)
 {
-    // create a buf and
-    // uint8_t buf[OTA_MAX_DATA_SIZE];
     PRINTF("PREPARE_OTA_REQUEST_PACKET: preparing REQUEST packet.\n");
 
     // set variables for packet
@@ -361,7 +417,7 @@ static uint8_t prepare_ota_packet_request_packet(struct ota_packet *p, uint8_t m
     uint16_t packet_num = find_packet_number(&current_ota_info);
 
     p->msg_type = msg_type;
-    p->fw_version = last_ota_info.fw_version;
+    p->fw_version = current_ota_info.fw_version;
     p->fw_fragment_num = packet_num;
 
     print_packet_status(p);
@@ -385,7 +441,7 @@ static uint8_t prepare_ota_data_packet(struct ota_packet *p, uint8_t msg_type)
     get_firmware_data(buf, current_ota_fragnum, current_ota_info.fw_fragment_size);
 
     p->msg_type = msg_type;
-    p->fw_version = last_ota_info.fw_version;
+    p->fw_version = current_ota_info.fw_version;
     p->fw_fragment_num = current_ota_fragnum;
     memcpy(p->data.buf, buf, current_ota_info.fw_fragment_size);
     p->data.len = current_ota_info.fw_fragment_size;
@@ -447,7 +503,6 @@ static uint8_t prepare_ota_packet(struct ota_packet *p, uint8_t msg_type)
 static uint8_t create_ota_packet(uint8_t *buf, uint8_t len, struct ota_packet *p)
 {
     uint8_t cur_len = 0;
-    // print_packet_status(p);
 
     // add message type to packet
     if ((len - cur_len) >= 1)
@@ -740,6 +795,7 @@ static void create_ota_bitmap(uint16_t fw_fragment_num)
     PRINTF("CREATE_OTA_BITMAP: ota_bitmap_byte_size is: %d\n", ota_bitmap_byte_size);
     PRINTF("CREATE_OTA_BITMAP: ota_bitmap_remaining_bit_size is: %d\n", ota_bitmap_remaining_bit_size);
 
+    // calculate buffer size to nearest multiple of 4
     uint16_t buffer_size = (ota_bitmap_byte_size + 1 + 3) & ~3;
 
     // create a buffer to write bits into flash
@@ -830,46 +886,44 @@ static void write_program_data_to_flash(struct ota_packet *p)
     {
         watchdog_periodic();
         uint8_t ota_program_buf[256];
-        uint8_t bitmap_word_buf[FLASH_WORD_SIZE];
-        uint8_t bitmap_word_buf2[FLASH_WORD_SIZE];
-        uint8_t word_index = p->fw_fragment_num / (8 * FLASH_WORD_SIZE);
-        uint8_t bit_num = p->fw_fragment_num % (8 * FLASH_WORD_SIZE);
-        uint8_t byte_index = bit_num / 8;
-        uint8_t bit_index = bit_num % 8;
+        uint8_t bitmap_buf[FLASH_WORD_SIZE];
+        uint16_t bit_num = p->fw_fragment_num;
 
-        PRINTF("WRITE_PROGRAM_DATA_TO_FLASH: word: %d, bit num: %d, byte index: %d, bit: %d\n", word_index, bit_num, byte_index, bit_index);
+        // see which index of bitmap
+        PRINTF("WRITE_PROGRAM_DATA_TO_FLASH: bit num: %d\n", bit_num);
 
+        // read program area before writing op.
         PRINTF("WRITE_PROGRAM_DATA_TO_FLASH: control passed. Program area before write operation:\n");
         ota_arch_read(ota_program_buf, FLASH_OTA_DATA_ADDR, 256);
         printBufferHex(ota_program_buf, 256);
         PRINTF("\n");
 
+        // write data to flash
         ota_arch_write(p->data.buf, (FLASH_OTA_DATA_ADDR + (p->fw_fragment_num * p->data.len)), p->data.len);
 
+        // read program area after write operation
         ota_arch_read(ota_program_buf, FLASH_OTA_DATA_ADDR, 256);
-        PRINTF("WRITE_PROGRAM_DATA_TO_FLASH: control passed. Program area after write operation:\n");
+        PRINTF("WRITE_PROGRAM_DATA_TO_FLASH: Program area after write operation:\n");
         printBufferHex(ota_program_buf, 256);
         PRINTF("\n");
 
-        ota_arch_read(bitmap_word_buf, FLASH_OTA_BITMAP_ADDR + (word_index * FLASH_WORD_SIZE), FLASH_WORD_SIZE);
+        // read bitmap to change bit
+        ota_arch_read(bitmap_buf, FLASH_OTA_BITMAP_ADDR, 256);
         PRINTF("WRITE_PROGRAM_DATA_TO_FLASH: read bitmap. Word is before write op.:\n");
-        printBufferHex(bitmap_word_buf, FLASH_WORD_SIZE);
+        printBufferHex(bitmap_buf, 256);
         PRINTF("\n");
 
-        setBit(bitmap_word_buf, bit_num);
+        // set bit
+        setBit(bitmap_buf, bit_num);
 
-        PRINTF("WRITE_PROGRAM_DATA_TO_FLASH: Word is after change.:\n");
-        printBufferHex(bitmap_word_buf, FLASH_WORD_SIZE);
-        PRINTF("\n");
-
-        memcpy(bitmap_word_buf2, bitmap_word_buf, FLASH_WORD_SIZE);
-
+        // erase page and write it again
         ota_arch_erase(FLASH_OTA_BITMAP_ADDR, FLASH_PAGE_SIZE);
-        ota_arch_write(bitmap_word_buf2, FLASH_OTA_BITMAP_ADDR + (word_index * FLASH_WORD_SIZE), FLASH_WORD_SIZE);
+        ota_arch_write(bitmap_buf, FLASH_OTA_BITMAP_ADDR, 256);
 
-        ota_arch_read(bitmap_word_buf2, FLASH_OTA_BITMAP_ADDR + (word_index * FLASH_WORD_SIZE), FLASH_WORD_SIZE);
+        // read to debug
+        ota_arch_read(bitmap_buf, FLASH_OTA_BITMAP_ADDR, 256);
         PRINTF("WRITE_PROGRAM_DATA_TO_FLASH: read bitmap. Word is after write op.:\n");
-        printBufferHex(bitmap_word_buf2, FLASH_WORD_SIZE);
+        printBufferHex(bitmap_buf, 256);
         PRINTF("\n");
     }
 
@@ -883,7 +937,16 @@ static void update_ctimer_callback()
 {
     PRINTF("Update Ctimer expired!\n");
 
-    ota_process_state = STATE_REQUEST;
+    if (ota_process_state == STATE_UPDATE_CLIENT)
+    {
+        copy_ota_info(&last_ota_info, &current_ota_info);
+    }
+    if (ota_process_state == STATE_UPDATE_SERVER)
+    {
+        clear_updating_device_list();
+    }
+
+    ota_cell_num = 0;
 
     ctimer_restart(&update_state_timer);
     ctimer_stop(&update_state_timer);
@@ -899,6 +962,53 @@ static void reset_update_ctimer()
 {
     PRINTF("Resetting update callback timer...\n");
     ctimer_restart(&update_state_timer);
+}
+
+static void init_variables()
+{
+    uint8_t ota_area_buf[256];
+
+    // read previous ota info from flash
+    ota_arch_read(ota_area_buf, FLASH_OTA_INFO_ADDR, 256);
+    PRINTF("TEST_FLASH_PROCESS: OTA info buffer after write operation:\n");
+    printBufferHex(ota_area_buf, 256);
+    PRINTF("\n");
+
+    last_ota_info = ota_parse_info_buf(ota_area_buf, 256);
+
+    if (last_ota_info.fw_version == 0xffffffff)
+    {
+        last_ota_info.fw_version = 1;
+        last_ota_info.fw_size = 1;
+        last_ota_info.fw_fragment_size = 1;
+        last_ota_info.fw_fragment_num = 1;
+        last_ota_info.crc = 1;
+    }
+
+    PRINTF("TEST_FLASH_PROCESS: last_ota_info packet status:\n");
+    print_ota_info_packet_status(&last_ota_info);
+}
+
+static uint8_t is_ota_info_area_empty()
+{
+    uint8_t ota_area_buf[256];
+
+    // read previous ota info from flash
+    ota_arch_read(ota_area_buf, FLASH_OTA_INFO_ADDR, 256);
+    PRINTF("TEST_FLASH_PROCESS: OTA info buffer after write operation:\n");
+    printBufferHex(ota_area_buf, 256);
+    PRINTF("\n");
+
+    last_ota_info = ota_parse_info_buf(ota_area_buf, 256);
+
+    if (last_ota_info.fw_version == 0xffffffff)
+    {
+        return 1;
+    }
+    else
+    {
+        return 0;
+    }
 }
 
 // UDP connection callback handler
@@ -932,7 +1042,7 @@ udp_callback(struct simple_udp_connection *c,
     case OTA_REQUEST:
         PRINTF("UDP_CALLBACK: Incoming packet type is OTA_REQUEST.\n");
 
-        if (compare_firmware_version(incoming_packet.fw_version) && ota_cell_num < MAX_OTA_CELL && check_updating_device_list((uip_ipaddr_t *)sender_addr))
+        if (compare_firmware_version(incoming_packet.fw_version) && check_updating_device_list((uip_ipaddr_t *) sender_addr) && ota_cell_num < MAX_OTA_CELL)
         {
             PRINTF("UDP_CALLBACK: Starting OTA...\n");
 
@@ -972,9 +1082,9 @@ udp_callback(struct simple_udp_connection *c,
             PRINTF("UDP_CALLBACK: Got OTA response message and set current_ota_info packet. Packet info is: \n");
             print_ota_info_packet_status(&current_ota_info);
 
-            write_ota_info_to_flash(&current_ota_info);
-            create_ota_bitmap(current_ota_info.fw_fragment_num);
-            // ota_arch_erase(FLASH_OTA_DATA_ADDR, last_ota_info.fw_size);
+            write_ota_info_to_flash(&current_ota_info);                 // write ota info to flash
+            create_ota_bitmap(current_ota_info.fw_fragment_num);        // create bitmap for ota
+            ota_arch_erase(FLASH_OTA_DATA_ADDR, last_ota_info.fw_size); // erase last ota data
 
             uint8_t buf_info[64];
             uint8_t buf_bitmap[64];
@@ -990,6 +1100,7 @@ udp_callback(struct simple_udp_connection *c,
             PRINTF("\n");
 
             start_update_ctimer();
+            ota_cell_num++;
             ota_process_state = STATE_UPDATE_CLIENT;
         }
         else
@@ -1003,8 +1114,10 @@ udp_callback(struct simple_udp_connection *c,
         reset_update_ctimer();
 
         // TODO: Paket bilgisinin kontrolü düzeltilecek (current ota kısmı)
-        if (compare_firmware_version(incoming_packet.fw_version) && ota_process_state == STATE_UPDATE_SERVER)
+        if (compare_firmware_version(incoming_packet.fw_version) && ota_process_state == STATE_UPDATE_SERVER && !check_updating_device_list((uip_ipaddr_t *) sender_addr))
         {
+            remove_ipaddr_from_updating_device_list((uip_ipaddr_t *) sender_addr);
+
             current_ota_fragnum = incoming_packet.fw_fragment_num;
 
             if (prepare_ota_packet(&packet_to_send, OTA_DATA_PACKET))
@@ -1105,33 +1218,26 @@ PROCESS_THREAD(test_flash_process, ev, data)
     ota_info_flash.fw_size = 200;
     ota_info_flash.fw_fragment_num = (ota_info_flash.fw_size % OTA_MAX_DATA_SIZE) == 0 ? (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) : (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) + 1;
     ota_info_flash.fw_fragment_size = OTA_MAX_DATA_SIZE;
-
-    PRINTF("TEST_FLASH_PROCESS: ota_info_flash packet status:\n");
-    print_ota_info_packet_status(&ota_info_flash);
-
-    // create info buffer and write it into flash
-    cur_len = create_ota_info_buffer(ota_area_buf, sizeof(struct ota_info), &ota_info_flash);
-
-    ota_arch_erase(FLASH_OTA_INFO_ADDR, FLASH_PAGE_SIZE);
-    ota_arch_write(ota_area_buf, FLASH_OTA_INFO_ADDR, cur_len);
-
 #else
     ota_info_flash.fw_version = 1;
     ota_info_flash.crc = 1;
     ota_info_flash.fw_size = 100;
     ota_info_flash.fw_fragment_num = (ota_info_flash.fw_size % OTA_MAX_DATA_SIZE) == 0 ? (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) : (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) + 1;
     ota_info_flash.fw_fragment_size = OTA_MAX_DATA_SIZE;
-
-    PRINTF("TEST_FLASH_PROCESS: ota_info_flash packet status:\n");
-    print_ota_info_packet_status(&ota_info_flash);
-
-    // create info buffer and write it into flash
-    cur_len = create_ota_info_buffer(ota_area_buf, sizeof(struct ota_info), &ota_info_flash);
-
-    ota_arch_erase(FLASH_OTA_INFO_ADDR, FLASH_PAGE_SIZE);
-    ota_arch_write(ota_area_buf, FLASH_OTA_INFO_ADDR, cur_len);
-
 #endif
+
+    // check the ota info area and if it's empty, fill with ota_info_flash value
+    if (is_ota_info_area_empty())
+    {
+        PRINTF("TEST_FLASH_PROCESS: ota_info_flash packet status:\n");
+        print_ota_info_packet_status(&ota_info_flash);
+
+        // create info buffer and write it into flash
+        cur_len = create_ota_info_buffer(ota_area_buf, sizeof(struct ota_info), &ota_info_flash);
+
+        ota_arch_erase(FLASH_OTA_INFO_ADDR, FLASH_PAGE_SIZE);
+        ota_arch_write(ota_area_buf, FLASH_OTA_INFO_ADDR, cur_len);
+    }
 
     /*----------------------------------------------------------------------------------------------------------------*/
 
@@ -1142,29 +1248,10 @@ PROCESS_THREAD(test_flash_process, ev, data)
     ota_arch_write(ota_data, FLASH_OTA_DATA_ADDR, 100);
 #endif
 
-    // read previous ota info from flash
-    ota_arch_read(ota_area_buf, FLASH_OTA_INFO_ADDR, 256);
-    PRINTF("TEST_FLASH_PROCESS: OTA info buffer after write operation:\n");
-    printBufferHex(ota_area_buf, 256);
-    PRINTF("\n");
-
-    last_ota_info = ota_parse_info_buf(ota_area_buf, 256);
-
-    if (last_ota_info.fw_version == 0xffffffff)
-    {
-        last_ota_info.fw_version = 1;
-        last_ota_info.fw_size = 1;
-        last_ota_info.fw_fragment_size = 1;
-        last_ota_info.fw_fragment_num = 1;
-        last_ota_info.crc = 1;
-    }
-
-    PRINTF("TEST_FLASH_PROCESS: last_ota_info packet status:\n");
-    print_ota_info_packet_status(&last_ota_info);
-
-    ota_arch_read(ota_area_buf, FLASH_OTA_DATA_ADDR, 256);
+    init_variables();
 
     // ota area debug
+    ota_arch_read(ota_area_buf, FLASH_OTA_DATA_ADDR, 256);
     PRINTF("TEST_FLASH_PROCESS: OTA data area read:\n");
     printBufferHex(ota_area_buf, 256);
     PRINTF("\n");
@@ -1187,6 +1274,8 @@ PROCESS_THREAD(request_process, ev, data)
 
     PROCESS_BEGIN();
     PROCESS_PAUSE();
+
+    PRINTF("Size of uip_ipaddr_t variable: %d\n", sizeof(uip_ipaddr_t));
 
     // set synch timer and wait until node is synchronized.
     etimer_set(&et_identify, AUTHENTICATION_INTERVAL * CLOCK_SECOND);
@@ -1318,6 +1407,12 @@ PROCESS_THREAD(update_process, ev, data)
         }
         else
         {
+            PRINTF("UPDATE_PROECSS: Invalid Update Process State!\n");
+            break;
+        }
+
+        if (ota_cell_num == 0)
+        {
             break;
         }
 
@@ -1326,8 +1421,8 @@ PROCESS_THREAD(update_process, ev, data)
         etimer_reset(&et_update);
     }
 
+    ota_process_state = STATE_REQUEST;
     process_post(&request_process, state_request_event, NULL);
-    ota_cell_num--;
 
     PROCESS_END();
 }
