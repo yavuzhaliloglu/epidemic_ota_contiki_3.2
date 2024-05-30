@@ -3,10 +3,10 @@
 
 // time interval to send request message
 #define REQUEST_SEND_INTERVAL 15
-//packet request waiting time threshold
+// packet request waiting time threshold
 #define PACKET_REQUEST_THRESHOLD 45
 // max data size for OTA data
-#define OTA_MAX_DATA_SIZE 64
+#define OTA_MAX_DATA_SIZE 16
 // enable time synch
 #define TSCH_TIME_SYNCH 1
 // authenticate interval time
@@ -23,8 +23,9 @@ enum ota_message_types
 {
     OTA_REQUEST = 0x01,
     OTA_RESPONSE = 0X02,
-    OTA_PACKET_REQUEST = 0x03,
-    OTA_DATA_PACKET = 0x04,
+    OTA_ACK = 0x03,
+    OTA_PACKET_REQUEST = 0x04,
+    OTA_DATA_PACKET = 0x05,
 };
 
 // device states

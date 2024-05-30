@@ -40,24 +40,15 @@
 
 /*--------------------------------------------------------------Variables----*/
 
-// UDP connection variable
-static struct simple_udp_connection udp_conn;
-// Device ota_process_state
-static enum device_state ota_process_state = STATE_REQUEST;
-// Current ota process activated node count
-static uint8_t ota_cell_num = 0;
-// current updating device list
-static uip_ipaddr_t updating_device_list[MAX_OTA_CELL];
-// current ota info
-static struct ota_info current_ota_info;
-// last ota info
-static struct ota_info last_ota_info;
-// update state callback timer
-static struct ctimer update_state_timer;
-// current fragnum for ota
-static uint16_t current_ota_fragnum;
-// request event variable
-process_event_t state_request_event;
+static struct simple_udp_connection udp_conn;               // UDP connection variable
+static enum device_state ota_process_state = STATE_REQUEST; // Device ota_process_state
+static uint8_t ota_cell_num = 0;                            // Current ota process activated node count
+static uip_ipaddr_t updating_device_list[MAX_OTA_CELL];     // current updating device list
+static struct ota_info current_ota_info;                    // current ota info
+static struct ota_info last_ota_info;                       // last ota info
+static struct ctimer update_state_timer;                    // update state callback timer
+static uint16_t current_ota_fragnum;                        // current fragnum for ota
+process_event_t state_request_event;                        // request event variable
 
 /*--------------------------------------------------------------Processes----*/
 
@@ -129,27 +120,7 @@ static void print_ota_info_packet_status(struct ota_info *p)
     PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->fw_fragment_size: %d\n", p->fw_fragment_size);
 }
 
-// // print current device state
-// static void get_device_state(enum device_state state)
-// {
-//     PRINTF("GET_DEVICE_STATE: Device State is: ");
-//     switch (state)
-//     {
-//     case STATE_REQUEST:
-//         PRINTF("STATE_REQUEST\n");
-//         break;
-//     case STATE_UPDATE_CLIENT:
-//         PRINTF("STATE_UPDATE_CLIENT\n");
-//         break;
-//     case STATE_UPDATE_SERVER:
-//         PRINTF("STATE_UPDATE_SERVER\n");
-//         break;
-//     default:
-//         PRINTF("State ERROR!\n");
-//         break;
-//     }
-// }
-
+// reverses 1 byte's bits
 static uint8_t reverseBits(uint8_t byte)
 {
     uint8_t reversed = 0;
@@ -163,9 +134,10 @@ static uint8_t reverseBits(uint8_t byte)
     return reversed;
 }
 
+// finds zero bit in a byte
 static int8_t findZeroBit(uint8_t byte)
 {
-    for (uint8_t i = 7; i >= 0; i--)
+    for (int8_t i = 7; i >= 0; i--)
     {
         if (((byte >> i) & 1) == 0)
         {
@@ -175,6 +147,7 @@ static int8_t findZeroBit(uint8_t byte)
     return -1; // No 0 bit found
 }
 
+// sets bit in given index
 static void setBit(uint8_t *word, uint16_t index)
 {
     uint8_t byteIndex = index / 8;
@@ -185,6 +158,7 @@ static void setBit(uint8_t *word, uint16_t index)
     word[byteIndex] |= mask;
 }
 
+// reads firmware data from given fragnum index as fragsize bytes
 static void get_firmware_data(uint8_t *buf, uint16_t fragnum, uint8_t fragsize)
 {
     PRINTF("SEND_FIRMWARE_PACKET: reading %d fragnum from ota address with %d size...\n", fragnum, fragsize);
@@ -210,17 +184,18 @@ void add_ip_to_list(uip_ipaddr_t *list, uip_ipaddr_t *new_ip, uint8_t *list_size
     }
 }
 
-static uint16_t find_packet_number(struct ota_info *p)
+// finds first 0 bit in bitmap and returns index of that bit
+static int find_packet_number(struct ota_info *p)
 {
     uint8_t bitmap_word_buf[FLASH_WORD_SIZE];
     uint16_t current_ota_bitmap_length = p->fw_fragment_num;
     uint16_t word_index = 0;
     uint8_t byte_index = 0;
-    uint8_t bit_index = 0;
+    int8_t bit_index = 0;
     uint16_t packet_num = 0;
     uint8_t bit_found_flag = 0;
 
-    while (word_index <= (current_ota_bitmap_length / 4))
+    while (word_index <= (current_ota_bitmap_length / (FLASH_WORD_SIZE * 8)))
     {
         ota_arch_read(bitmap_word_buf, FLASH_OTA_BITMAP_ADDR + (word_index * FLASH_WORD_SIZE), FLASH_WORD_SIZE);
 
@@ -231,7 +206,6 @@ static uint16_t find_packet_number(struct ota_info *p)
         for (uint8_t byte_num = 0; byte_num < FLASH_WORD_SIZE; byte_num++)
         {
             bit_index = findZeroBit(bitmap_word_buf[byte_num]);
-
             if (bit_index >= 0)
             {
                 byte_index = byte_num;
@@ -251,54 +225,55 @@ static uint16_t find_packet_number(struct ota_info *p)
         watchdog_periodic();
     }
 
+    if (bit_index == -1)
+    {
+        PRINTF("FIND_PACKET_NUMBER: Packet cannot found in bitmap.\n");
+        return -1;
+    }
+
     PRINTF("FIND_PACKET_NUMBER: Bitmap 0 Found in index -> %d.Word, %d.Byte, %d.Bit\n", word_index, byte_index, bit_index);
     packet_num = (word_index * FLASH_WORD_SIZE * 8) + (byte_index * 8) + bit_index;
 
     return packet_num;
 }
 
-static uint8_t check_last_ota_info()
+// controls bitmap if there is any 0 bit. If 0 bit exists returns 0, if not returns 1
+static uint8_t is_bitmap_full()
 {
-    uint16_t packet_number = find_packet_number(&last_ota_info);
+    int is_packet_found = find_packet_number(&last_ota_info);
 
-    if (last_ota_info.fw_fragment_num <= packet_number)
+    if (is_packet_found >= 0)
     {
-        return 1;
+        return 0;
     }
     else
     {
-        return 0;
+        return 1;
     }
 }
 
 // compare this firmware version with given firmware version, if this firmware version is newer return 1, if older or equal return 0
 static uint8_t compare_firmware_version(uint32_t fw_version)
 {
-    if (last_ota_info.fw_version > fw_version)
+    if (last_ota_info.fw_version < fw_version)
     {
-        PRINTF("COMPARE_FIRMWARE_VERSION: this firmware version is newer than incoming firmware version.\n");
-        return 1;
+        PRINTF("COMPARE_FIRMWARE_VERSION: this firmware version is older than incoming firmware version.\n");
+        return 0;
     }
     else if (last_ota_info.fw_version == fw_version)
     {
-        if (check_last_ota_info())
-        {
-            return 1;
-        }
-        else
-        {
-            return 0;
-        }
+        PRINTF("COMPARE_FIRMWARE_VERSION: this firmware version and incoming firmware version is euqal.\n");
+        return 1;
     }
     else
     {
-        PRINTF("COMPARE_FIRMWARE_VERSION: this firmware version is older than or equal incoming firmware version.\n");
-        return 0;
+        PRINTF("COMPARE_FIRMWARE_VERSION: this firmware version is newer than incoming firmware version.\n");
+        return 2;
     }
 }
 
 // returns 1 if ipaddr is not in the list, returns 0 if ipaddr is in the list
-static uint8_t check_updating_device_list(uip_ipaddr_t *ipaddr)
+static uint8_t is_address_in_updating_device_list(uip_ipaddr_t *ipaddr)
 {
     uint8_t list_idx = 0;
 
@@ -306,8 +281,8 @@ static uint8_t check_updating_device_list(uip_ipaddr_t *ipaddr)
     {
         if (uip_ip6addr_cmp(&updating_device_list[list_idx], ipaddr))
         {
-            PRINTF("CHECK_UPDATING_DEVICE_LIST: This device is already in updating list!\n");
-            return 0;
+            PRINTF("IS_ADDRESS_IN_UPDATING_DEVICE_LIST: This device is already in updating list!\n");
+            return 1;
         }
 
         list_idx++;
@@ -315,13 +290,13 @@ static uint8_t check_updating_device_list(uip_ipaddr_t *ipaddr)
 
     list_idx--;
 
-    PRINTF("CHECK_UPDATING_DEVICE_LIST: This device is not updating. Adding update list.\n");
-    // TODO: ADD TO THE LIST BUT HOW TO DELETE?
+    PRINTF("IS_ADDRESS_IN_UPDATING_DEVICE_LIST: This device is not updating. Adding update list.\n");
     add_ip_to_list(updating_device_list, ipaddr, &list_idx);
 
-    return 1;
+    return 0;
 }
 
+// clears content of updating device list array
 static void clear_updating_device_list()
 {
     uint8_t lst_idx = 0;
@@ -331,9 +306,10 @@ static void clear_updating_device_list()
         uip_create_unspecified(&updating_device_list[lst_idx]);
     }
 
-    PRINTF("CLEAR_UPDATING_DEVICE_LIST: All entries have been cleared.\n");
+    PRINTF("CLEAR_UPDATING_DEVICE_LIST: All entries have been cleaned.\n");
 }
 
+// removes an ip address from updating device list
 static uint8_t remove_ipaddr_from_updating_device_list(uip_ipaddr_t *ipaddr)
 {
     uint8_t lst_idx = 0;
@@ -356,12 +332,14 @@ static uint8_t remove_ipaddr_from_updating_device_list(uip_ipaddr_t *ipaddr)
             PRINTF("REMOVE_IPADDR_FROM_UPDATING_DEVICE_LIST: removing process completed.\n");
             return 1;
         }
+
         lst_idx++;
     }
 
     PRINTF("REMOVE_IPADDR_FROM_UPDATING_DEVICE_LIST: This address cannot be found in the updating list!\n");
     return 0;
 }
+
 // create a request content buffer (add msg type and firmware version only)
 static uint8_t prepare_ota_request_packet(struct ota_packet *p, uint8_t msg_type)
 {
@@ -411,25 +389,54 @@ static uint8_t prepare_ota_response_packet(struct ota_packet *p, uint8_t msg_typ
     return 0;
 }
 
+static uint8_t prepare_ota_ack_packet(struct ota_packet *p, uint8_t msg_type)
+{
+    p->msg_type = msg_type;
+    p->fw_version = last_ota_info.fw_version;
+
+    PRINTF("PREPARE_OTA_ACK_PACKET: Prepared ACK packet, its content is:\n");
+    print_packet_status(p);
+
+    if (p->msg_type)
+    {
+        PRINTF("PREPARE_OTA_ACK_PACKET: Preparing ACK packet is successful.\n");
+        return 1;
+    }
+
+    PRINTF("PREPARE_OTA_ACK_PACKET: Preparing ACK packet is failed!\n");
+    return 0;
+}
+
 // create a packet request content buffer
 static uint8_t prepare_ota_packet_request_packet(struct ota_packet *p, uint8_t msg_type)
 {
-    uint16_t packet_num = find_packet_number(&current_ota_info);
+    int packet_number_returned_bitmap = find_packet_number(&current_ota_info);
+    uint16_t packet_num;
 
-    p->msg_type = msg_type;
-    p->fw_version = current_ota_info.fw_version;
-    p->fw_fragment_num = packet_num;
-
-    print_packet_status(p);
-
-    if (p->msg_type && p->fw_version && p->fw_fragment_num >= 0 && p->fw_fragment_num <= current_ota_info.fw_fragment_num)
+    if (packet_number_returned_bitmap >= 0)
     {
-        PRINTF("PREPARE_OTA_PACKET_REQUEST_PACKET: Packet Created Successfully.\n");
-        return 1;
+        packet_num = (uint16_t)packet_number_returned_bitmap;
+
+        p->msg_type = msg_type;
+        p->fw_version = current_ota_info.fw_version;
+        p->fw_fragment_num = packet_num;
+
+        print_packet_status(p);
+
+        if (p->msg_type && p->fw_version && p->fw_fragment_num >= 0 && p->fw_fragment_num <= current_ota_info.fw_fragment_num)
+        {
+            PRINTF("PREPARE_OTA_PACKET_REQUEST_PACKET: Packet Created Successfully.\n");
+            return 1;
+        }
+        else
+        {
+            PRINTF("PREPARE_OTA_PACKET_REQUEST_PACKET: Packet CANNOT created!\n");
+            return 0;
+        }
     }
     else
     {
-        PRINTF("PREPARE_OTA_PACKET_REQUEST_PACKET: Packet CANNOT created!\n");
+        PRINTF("PREPARE_OTA_PACKET_REQUEST_PACKET: Bitmap is full! there is no packet to request!\n");
         return 0;
     }
 }
@@ -476,6 +483,9 @@ static uint8_t prepare_ota_packet(struct ota_packet *p, uint8_t msg_type)
     case OTA_RESPONSE:
         is_packet_prepared = prepare_ota_response_packet(p, msg_type);
         break;
+
+    case OTA_ACK:
+        is_packet_prepared = prepare_ota_ack_packet(p, msg_type);
 
     case OTA_PACKET_REQUEST:
         is_packet_prepared = prepare_ota_packet_request_packet(p, msg_type);
@@ -817,13 +827,12 @@ static void create_ota_bitmap(uint16_t fw_fragment_num)
     if (ota_bitmap_remaining_bit_size != 0 || current_buffer_len == 0)
     {
         fragment_number_buffer[current_buffer_len] = reverseBits(last_byte_of_ota_bitmap << ota_bitmap_remaining_bit_size);
-
-        if (current_buffer_len == 0)
-            current_buffer_len++;
+        current_buffer_len++;
     }
     else
     {
         fragment_number_buffer[current_buffer_len] = last_byte_of_ota_bitmap;
+        current_buffer_len++;
     }
 
     // change 00 paddings to FF
@@ -1042,7 +1051,7 @@ udp_callback(struct simple_udp_connection *c,
     case OTA_REQUEST:
         PRINTF("UDP_CALLBACK: Incoming packet type is OTA_REQUEST.\n");
 
-        if (compare_firmware_version(incoming_packet.fw_version) && check_updating_device_list((uip_ipaddr_t *) sender_addr) && ota_cell_num < MAX_OTA_CELL)
+        if (compare_firmware_version(incoming_packet.fw_version) && !is_address_in_updating_device_list((uip_ipaddr_t *)sender_addr) && ota_cell_num < MAX_OTA_CELL)
         {
             PRINTF("UDP_CALLBACK: Starting OTA...\n");
 
@@ -1057,13 +1066,10 @@ udp_callback(struct simple_udp_connection *c,
 
                     // send packet
                     simple_udp_sendto(c, buf_to_send, buf_len, sender_addr);
-
-                    ota_cell_num++;
-                    copy_ota_info(&current_ota_info, &last_ota_info);
-                    start_update_ctimer();
-                    ota_process_state = STATE_UPDATE_SERVER;
                 }
             }
+
+            start_update_ctimer();
         }
 
         break;
@@ -1071,7 +1077,7 @@ udp_callback(struct simple_udp_connection *c,
     case OTA_RESPONSE:
         PRINTF("UDP_CALLBACK: Incoming packet type is OTA_RESPONSE.\n");
 
-        if (!compare_firmware_version(incoming_packet.fw_version) && ota_process_state == STATE_REQUEST)
+        if ((compare_firmware_version(incoming_packet.fw_version) == 0 || (compare_firmware_version(incoming_packet.fw_version) == 1 && !is_bitmap_full())) && ota_process_state == STATE_REQUEST)
         {
             current_ota_info.fw_version = incoming_packet.fw_version;
             current_ota_info.fw_fragment_size = incoming_packet.fw_fragment_size;
@@ -1082,9 +1088,12 @@ udp_callback(struct simple_udp_connection *c,
             PRINTF("UDP_CALLBACK: Got OTA response message and set current_ota_info packet. Packet info is: \n");
             print_ota_info_packet_status(&current_ota_info);
 
-            write_ota_info_to_flash(&current_ota_info);                 // write ota info to flash
-            create_ota_bitmap(current_ota_info.fw_fragment_num);        // create bitmap for ota
-            ota_arch_erase(FLASH_OTA_DATA_ADDR, last_ota_info.fw_size); // erase last ota data
+            if (compare_firmware_version(incoming_packet.fw_version) == 0)
+            {
+                write_ota_info_to_flash(&current_ota_info);                 // write ota info to flash
+                create_ota_bitmap(current_ota_info.fw_fragment_num);        // create bitmap for ota
+                ota_arch_erase(FLASH_OTA_DATA_ADDR, last_ota_info.fw_size); // erase last ota data
+            }
 
             uint8_t buf_info[64];
             uint8_t buf_bitmap[64];
@@ -1099,6 +1108,25 @@ udp_callback(struct simple_udp_connection *c,
             printBufferHex(buf_bitmap, 64);
             PRINTF("\n");
 
+            // send ack
+            if (prepare_ota_packet(&packet_to_send, OTA_ACK))
+            {
+                buf_len = create_ota_packet(buf_to_send, PACKET_SIZE, &packet_to_send);
+                if (buf_len > 0)
+                {
+                    PRINTF("Data Packet Created. Packet is:\n");
+                    printBufferHex(buf_to_send, buf_len);
+                    PRINTF("\n");
+
+                    PRINTF("Packet is sending to ");
+                    PRINT6ADDR(sender_addr);
+                    PRINTF("\n");
+
+                    // send packet
+                    simple_udp_sendto(c, buf_to_send, buf_len, sender_addr);
+                }
+            }
+
             start_update_ctimer();
             ota_cell_num++;
             ota_process_state = STATE_UPDATE_CLIENT;
@@ -1109,14 +1137,23 @@ udp_callback(struct simple_udp_connection *c,
         }
         break;
 
+    case OTA_ACK:
+        PRINTF("UDP_CALLBACK: Incoming packet type is OTA_ACK.\n");
+
+        ota_cell_num++;
+        copy_ota_info(&current_ota_info, &last_ota_info);
+        reset_update_ctimer();
+        ota_process_state = STATE_UPDATE_SERVER;
+        break;
+
     case OTA_PACKET_REQUEST:
         PRINTF("UDP_CALLBACK: Incoming packet type is OTA_PACKET_REQUEST.\n");
         reset_update_ctimer();
 
         // TODO: Paket bilgisinin kontrolü düzeltilecek (current ota kısmı)
-        if (compare_firmware_version(incoming_packet.fw_version) && ota_process_state == STATE_UPDATE_SERVER && !check_updating_device_list((uip_ipaddr_t *) sender_addr))
+        if (compare_firmware_version(incoming_packet.fw_version) && ota_process_state == STATE_UPDATE_SERVER && is_address_in_updating_device_list((uip_ipaddr_t *)sender_addr))
         {
-            remove_ipaddr_from_updating_device_list((uip_ipaddr_t *) sender_addr);
+            remove_ipaddr_from_updating_device_list((uip_ipaddr_t *)sender_addr);
 
             current_ota_fragnum = incoming_packet.fw_fragment_num;
 
@@ -1283,6 +1320,7 @@ PROCESS_THREAD(request_process, ev, data)
     {
         PROCESS_WAIT_UNTIL(etimer_expired(&et_identify));
         etimer_reset(&et_identify);
+        PRINTF("waiting to synch...\n");
     }
 
     PRINTF("1\n");
