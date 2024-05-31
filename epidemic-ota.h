@@ -17,6 +17,8 @@
 #define PACKET_REQUEST_INTERVAL 15
 // crc size
 #define CRC_SIZE 32
+// max blacklist node count
+#define MAX_BLACKLIST_NODES 2
 
 // ota message types
 enum ota_message_types
@@ -46,12 +48,13 @@ struct ota_data
 // ota packet struct, holds message type, message len and message itself
 struct ota_packet
 {
-    // uip_ipaddr_t sender_ip_addr;
     uint8_t msg_type;
     uint32_t fw_version;
     uint32_t fw_size;
     uint16_t fw_fragment_num;
     uint8_t fw_fragment_size;
+    uint32_t crc;
+    uip_ipaddr_t blacklist_nodes[MAX_BLACKLIST_NODES];
     struct ota_data data;
 };
 
@@ -62,6 +65,7 @@ struct ota_info
     uint32_t fw_size;
     uint16_t fw_fragment_num;
     uint8_t fw_fragment_size;
+    uip_ipaddr_t blacklist_nodes[MAX_BLACKLIST_NODES];
 };
 
 #define PACKET_SIZE sizeof(struct ota_packet)

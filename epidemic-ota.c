@@ -101,14 +101,20 @@ static void print_packet_status(struct ota_packet *p)
         PRINTF("PRINT_PACKET_STATUS: p->fw_fragment_num: %d\n", p->fw_fragment_num);
     if (p->msg_type == OTA_RESPONSE)
         PRINTF("PRINT_PACKET_STATUS: p->fw_fragment_size: %d\n", p->fw_fragment_size);
-    if (p->msg_type == OTA_DATA_PACKET || p->msg_type == OTA_RESPONSE)
+    if (p->msg_type == OTA_RESPONSE)
+        PRINTF("PRINT_PACKET_STATUS: p->crc: %ld\n", p->crc);
+    if (p->msg_type == OTA_RESPONSE)
+    {
+        PRINTF("PRINT_PACKET_STATUS: p->blacklist nodes: \n");
+        printBufferHex((uint8_t *)p->blacklist_nodes, sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES);
+    }
+    if (p->msg_type == OTA_DATA_PACKET)
+    {
         PRINTF("PRINT_PACKET_STATUS: p->data->len: %d\n", p->data.len);
-    if (p->msg_type == OTA_DATA_PACKET || p->msg_type == OTA_RESPONSE)
         PRINTF("PRINT_PACKET_STATUS: p->data->buf:\n");
-    if (p->msg_type == OTA_DATA_PACKET || p->msg_type == OTA_RESPONSE)
         printBufferHex(p->data.buf, p->data.len);
-
-    PRINTF("\n\n");
+        PRINTF("\n");
+    }
 }
 
 static void print_ota_info_packet_status(struct ota_info *p)
@@ -118,6 +124,13 @@ static void print_ota_info_packet_status(struct ota_info *p)
     PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->fw_size: %ld\n", p->fw_size);
     PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->fw_fragment_num: %d\n", p->fw_fragment_num);
     PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->fw_fragment_size: %d\n", p->fw_fragment_size);
+    PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->blacklist_nodes: \n");
+    for (int i = 0; i < MAX_BLACKLIST_NODES; i++)
+    {
+        printf("IP Address %d: ", i);
+        uip_debug_ipaddr_print(&p->blacklist_nodes[i]);
+        printf("\n");
+    }
 }
 
 // reverses 1 byte's bits
@@ -366,15 +379,13 @@ static uint8_t prepare_ota_response_packet(struct ota_packet *p, uint8_t msg_typ
     p->fw_size = last_ota_info.fw_size;
     p->fw_fragment_num = (last_ota_info.fw_size % OTA_MAX_DATA_SIZE) == 0 ? (last_ota_info.fw_size / OTA_MAX_DATA_SIZE) : (last_ota_info.fw_size / OTA_MAX_DATA_SIZE) + 1;
     p->fw_fragment_size = OTA_MAX_DATA_SIZE;
-
-    uint32_t crc = last_ota_info.crc;
-    p->data.len = sizeof(crc);
-    memcpy(p->data.buf, &crc, p->data.len);
+    p->crc = last_ota_info.crc;
+    memcpy(&p->blacklist_nodes, &last_ota_info.blacklist_nodes, (sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES));
 
     PRINTF("PREPARE_OTA_RESPONSE_PACKET: Prepared RESPONSE packet, its content is:\n");
     print_packet_status(p);
 
-    if (p->msg_type && p->fw_version && p->fw_size && p->fw_fragment_num && p->fw_fragment_size && p->data.len)
+    if (p->msg_type && p->fw_version && p->fw_size && p->fw_fragment_num && p->fw_fragment_size && p->crc)
     {
         PRINTF("PREPARE_OTA_RESPONSE_PACKET: Preparing RESPONSE packet is successful.\n");
         return 1;
@@ -578,7 +589,35 @@ static uint8_t create_ota_packet(uint8_t *buf, uint8_t len, struct ota_packet *p
         }
     }
 
-    if (p->msg_type == OTA_DATA_PACKET || p->msg_type == OTA_RESPONSE)
+    if (p->msg_type == OTA_RESPONSE)
+    {
+        if ((len - cur_len) >= sizeof(uint32_t))
+        {
+            memcpy(&buf[cur_len], &p->crc, sizeof(uint32_t));
+            cur_len += sizeof(uint32_t);
+        }
+        else
+        {
+            PRINTF("CREATE_OTA_PACKET: Firmware crc cannot added packet!\n");
+            return 0;
+        }
+    }
+
+    if (p->msg_type == OTA_RESPONSE)
+    {
+        if ((len - cur_len) >= sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES)
+        {
+            memcpy(&buf[cur_len], &p->blacklist_nodes, sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES);
+            cur_len += sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES;
+        }
+        else
+        {
+            PRINTF("CREATE_OTA_PACKET: Firmware blacklist nodes cannot added packet!\n");
+            return 0;
+        }
+    }
+
+    if (p->msg_type == OTA_DATA_PACKET)
     {
         // add firmware data len to packet
         if ((len - cur_len) >= 1)
@@ -593,7 +632,7 @@ static uint8_t create_ota_packet(uint8_t *buf, uint8_t len, struct ota_packet *p
         }
     }
 
-    if (p->msg_type == OTA_DATA_PACKET || p->msg_type == OTA_RESPONSE)
+    if (p->msg_type == OTA_DATA_PACKET)
     {
         // add firmware data to packet
         if ((len - cur_len) >= p->data.len)
@@ -671,6 +710,17 @@ static uint8_t create_ota_info_buffer(uint8_t *buf, uint8_t len, struct ota_info
         return 0;
     }
 
+    if ((len - cur_len) >= sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES)
+    {
+        memcpy(&buf[cur_len], &p->blacklist_nodes, sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES);
+        cur_len += sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES;
+    }
+    else
+    {
+        PRINTF("CREATE_OTA_INFO_PACKET: Firmware fragment size cannot added packet!\n");
+        return 0;
+    }
+
     return cur_len;
 }
 
@@ -716,6 +766,24 @@ static struct ota_packet ota_parse_buf(uint8_t *buf, uint16_t len)
         {
             p.fw_fragment_size = buf[cur_len];
             cur_len++;
+        }
+    }
+
+    if (p.msg_type == OTA_RESPONSE)
+    {
+        if ((len - cur_len) >= sizeof(uint32_t))
+        {
+            memcpy(&p.crc, &buf[cur_len], sizeof(uint32_t));
+            cur_len += sizeof(uint32_t);
+        }
+    }
+
+    if (p.msg_type == OTA_RESPONSE)
+    {
+        if ((len - cur_len) >= (sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES))
+        {
+            memcpy(&p.blacklist_nodes, &buf[cur_len], (sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES));
+            cur_len += (sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES);
         }
     }
 
@@ -773,6 +841,12 @@ static struct ota_info ota_parse_info_buf(uint8_t *buf, uint16_t len)
     {
         p.fw_fragment_size = buf[cur_len];
         cur_len++;
+    }
+
+    if ((len - cur_len) >= (sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES))
+    {
+        memcpy(&p.blacklist_nodes, &buf[cur_len], (sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES));
+        cur_len += sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES;
     }
 
     return p;
@@ -881,6 +955,7 @@ static void copy_ota_info(struct ota_info *dest, struct ota_info *src)
     dest->fw_fragment_size = src->fw_fragment_size;
     dest->fw_size = src->fw_size;
     dest->fw_version = src->fw_version;
+    memcpy(&dest->blacklist_nodes,&src->blacklist_nodes,(sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES));
 }
 
 // silme kısmı düzeltilecek
@@ -974,7 +1049,7 @@ static void init_variables()
 
     // read previous ota info from flash
     ota_arch_read(ota_area_buf, FLASH_OTA_INFO_ADDR, 256);
-    PRINTF("TEST_FLASH_PROCESS: OTA info buffer after write operation:\n");
+    PRINTF("INIT_VARIABLES: OTA info buffer after write operation:\n");
     printBufferHex(ota_area_buf, 256);
     PRINTF("\n");
 
@@ -989,7 +1064,7 @@ static void init_variables()
         last_ota_info.crc = 1;
     }
 
-    PRINTF("TEST_FLASH_PROCESS: last_ota_info packet status:\n");
+    PRINTF("INIT_VARIABLES: last_ota_info packet status:\n");
     print_ota_info_packet_status(&last_ota_info);
 }
 
@@ -1083,7 +1158,8 @@ udp_callback(struct simple_udp_connection *c,
             current_ota_info.fw_fragment_size = incoming_packet.fw_fragment_size;
             current_ota_info.fw_size = incoming_packet.fw_size;
             current_ota_info.fw_fragment_num = incoming_packet.fw_fragment_num;
-            current_ota_info.crc = (uint32_t)incoming_packet.data.buf[0];
+            current_ota_info.crc = incoming_packet.crc;
+            memcpy(&current_ota_info.blacklist_nodes,&incoming_packet.blacklist_nodes,(sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES));
 
             PRINTF("UDP_CALLBACK: Got OTA response message and set current_ota_info packet. Packet info is: \n");
             print_ota_info_packet_status(&current_ota_info);
@@ -1209,7 +1285,7 @@ PROCESS_THREAD(test_flash_process, ev, data)
     static uint8_t ota_area_buf[256];
     static uint8_t cur_len;
     static uint8_t ota_data[200];
-
+    static uip_ipaddr_t blacklist_nodes[MAX_BLACKLIST_NODES];
     PROCESS_BEGIN();
 
 #if !TEST_CLIENT
@@ -1258,6 +1334,27 @@ PROCESS_THREAD(test_flash_process, ev, data)
     ota_info_flash.fw_size = 200;
     ota_info_flash.fw_fragment_num = (ota_info_flash.fw_size % OTA_MAX_DATA_SIZE) == 0 ? (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) : (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) + 1;
     ota_info_flash.fw_fragment_size = OTA_MAX_DATA_SIZE;
+
+    uip_ip6addr(&blacklist_nodes[0], 0x2001, 0x0db8, 0x85a3, 0, 0, 0x8a2e, 0x0370, 0x7334);
+    uip_ip6addr(&blacklist_nodes[1], 0x2001, 0x0db8, 0x85a3, 0, 0, 0x8a2e, 0x0370, 0x7335);
+
+    PRINTF("TEST_FLASH_PROCESS: blacklist nodes: \n");
+    for (int i = 0; i < MAX_BLACKLIST_NODES; i++)
+    {
+        printf("IP Address %d: ", i);
+        uip_debug_ipaddr_print(&blacklist_nodes[i]);
+        printf("\n");
+    }
+
+    memcpy(&ota_info_flash.blacklist_nodes, &blacklist_nodes, sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES);
+
+    PRINTF("TEST_FLASH_PROCESS: ota_info_flash blacklist nodes: \n");
+    for (int i = 0; i < MAX_BLACKLIST_NODES; i++)
+    {
+        printf("IP Address %d: ", i);
+        uip_debug_ipaddr_print(&ota_info_flash.blacklist_nodes[i]);
+        printf("\n");
+    }
 #else
     ota_info_flash.fw_version = 1;
     ota_info_flash.crc = 1;
@@ -1315,8 +1412,6 @@ PROCESS_THREAD(request_process, ev, data)
     PROCESS_BEGIN();
     PROCESS_PAUSE();
 
-    PRINTF("Size of uip_ipaddr_t variable: %d\n", sizeof(uip_ipaddr_t));
-
     // set synch timer and wait until node is synchronized.
     etimer_set(&et_identify, AUTHENTICATION_INTERVAL * CLOCK_SECOND);
     while (!foure_control.authenticated || default_instance == NULL || default_instance->current_dag->preferred_parent == NULL)
@@ -1326,11 +1421,9 @@ PROCESS_THREAD(request_process, ev, data)
         PRINTF("waiting to synch...\n");
     }
 
-    PRINTF("1\n");
     // after the synchronization, get parent from default instance and get it's IP address.
     parent = default_instance->current_dag->preferred_parent;
     parent_ip_address = rpl_get_parent_ipaddr(parent);
-    PRINTF("2\n");
 
     PRINTF("authenticated!\n");
     PRINTF("Parent: ");
