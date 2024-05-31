@@ -272,8 +272,8 @@ static uint8_t compare_firmware_version(uint32_t fw_version)
     }
 }
 
-// returns 1 if ipaddr is not in the list, returns 0 if ipaddr is in the list
-static uint8_t is_address_in_updating_device_list(uip_ipaddr_t *ipaddr)
+// returns index of ip address in update device list
+static uint8_t find_address_index_in_updating_device_list(uip_ipaddr_t *ipaddr)
 {
     uint8_t list_idx = 0;
 
@@ -281,19 +281,14 @@ static uint8_t is_address_in_updating_device_list(uip_ipaddr_t *ipaddr)
     {
         if (uip_ip6addr_cmp(&updating_device_list[list_idx], ipaddr))
         {
-            PRINTF("IS_ADDRESS_IN_UPDATING_DEVICE_LIST: This device is already in updating list!\n");
-            return 1;
+            PRINTF("FIND_ADDRESS_INDEX_IN_UPDATE_DEVICE_LIST: This device is already in updating list!\n");
+            break;
         }
 
         list_idx++;
     }
-
-    list_idx--;
-
-    PRINTF("IS_ADDRESS_IN_UPDATING_DEVICE_LIST: This device is not updating. Adding update list.\n");
-    add_ip_to_list(updating_device_list, ipaddr, &list_idx);
-
-    return 0;
+    PRINTF("FIND_ADDRESS_INDEX_IN_UPDATE_DEVICE_LIST: This device is not in updating list!\n");
+    return list_idx;
 }
 
 // clears content of updating device list array
@@ -1043,6 +1038,7 @@ udp_callback(struct simple_udp_connection *c,
     struct ota_packet packet_to_send;
     uint8_t buf_to_send[PACKET_SIZE];
     uint8_t buf_len = 0;
+    uint8_t list_idx = 0;
 
     print_packet_status(&incoming_packet);
 
@@ -1051,9 +1047,13 @@ udp_callback(struct simple_udp_connection *c,
     case OTA_REQUEST:
         PRINTF("UDP_CALLBACK: Incoming packet type is OTA_REQUEST.\n");
 
-        if (compare_firmware_version(incoming_packet.fw_version) && !is_address_in_updating_device_list((uip_ipaddr_t *)sender_addr) && ota_cell_num < MAX_OTA_CELL)
+        list_idx = find_address_index_in_updating_device_list((uip_ipaddr_t *)sender_addr);
+
+        if (compare_firmware_version(incoming_packet.fw_version) && list_idx >= MAX_OTA_CELL && ota_cell_num < MAX_OTA_CELL)
         {
             PRINTF("UDP_CALLBACK: Starting OTA...\n");
+            list_idx--;
+            add_ip_to_list(updating_device_list, (uip_ipaddr_t *)sender_addr, &list_idx);
 
             if (prepare_ota_packet(&packet_to_send, OTA_RESPONSE))
             {
@@ -1151,9 +1151,12 @@ udp_callback(struct simple_udp_connection *c,
         reset_update_ctimer();
 
         // TODO: Paket bilgisinin kontrolü düzeltilecek (current ota kısmı)
-        if (compare_firmware_version(incoming_packet.fw_version) && ota_process_state == STATE_UPDATE_SERVER && is_address_in_updating_device_list((uip_ipaddr_t *)sender_addr))
+        if (compare_firmware_version(incoming_packet.fw_version) && ota_process_state == STATE_UPDATE_SERVER)
         {
-            remove_ipaddr_from_updating_device_list((uip_ipaddr_t *)sender_addr);
+            if (find_address_index_in_updating_device_list((uip_ipaddr_t *)sender_addr) < MAX_OTA_CELL)
+            {
+                remove_ipaddr_from_updating_device_list((uip_ipaddr_t *)sender_addr);
+            }
 
             current_ota_fragnum = incoming_packet.fw_fragment_num;
 
