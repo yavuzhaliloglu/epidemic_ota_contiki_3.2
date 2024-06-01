@@ -41,6 +41,7 @@
 /*--------------------------------------------------------------Variables----*/
 
 static struct simple_udp_connection udp_conn;               // UDP connection variable
+static uip_ipaddr_t *parent_ip_address;                     // Parent IP address
 static enum device_state ota_process_state = STATE_REQUEST; // Device ota_process_state
 static uint8_t ota_cell_num = 0;                            // Current ota process activated node count
 static uip_ipaddr_t updating_device_list[MAX_OTA_CELL];     // current updating device list
@@ -131,6 +132,7 @@ static void print_ota_info_packet_status(struct ota_info *p)
         uip_debug_ipaddr_print(&p->blacklist_nodes[i]);
         printf("\n");
     }
+    PRINTF("\n");
 }
 
 // reverses 1 byte's bits
@@ -936,11 +938,11 @@ static void send_packet_request(struct ota_packet *p)
         printBufferHex(buf, buf_len);
         PRINTF("\n");
         PRINTF("SEND_PACKET_REQUEST: Packet is created with %d size. Sending to ", buf_len);
-        PRINT6ADDR(rpl_get_parent_ipaddr(default_instance->current_dag->preferred_parent));
+        PRINT6ADDR(parent_ip_address);
         PRINTF("\n");
 
         // send packet
-        simple_udp_sendto(&udp_conn, buf, buf_len, rpl_get_parent_ipaddr(default_instance->current_dag->preferred_parent));
+        simple_udp_sendto(&udp_conn, buf, buf_len, parent_ip_address);
     }
     else
     {
@@ -955,7 +957,7 @@ static void copy_ota_info(struct ota_info *dest, struct ota_info *src)
     dest->fw_fragment_size = src->fw_fragment_size;
     dest->fw_size = src->fw_size;
     dest->fw_version = src->fw_version;
-    memcpy(&dest->blacklist_nodes,&src->blacklist_nodes,(sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES));
+    memcpy(&dest->blacklist_nodes, &src->blacklist_nodes, (sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES));
 }
 
 // silme kısmı düzeltilecek
@@ -1020,7 +1022,7 @@ static void update_ctimer_callback()
     {
         copy_ota_info(&last_ota_info, &current_ota_info);
     }
-    if (ota_process_state == STATE_UPDATE_SERVER)
+    else
     {
         clear_updating_device_list();
     }
@@ -1087,6 +1089,43 @@ static uint8_t is_ota_info_area_empty()
     else
     {
         return 0;
+    }
+}
+
+static uint8_t is_this_node_in_blacklist(uip_ipaddr_t *list, uint8_t len, uip_ipaddr_t *receiver_addr)
+{
+    PRINTF("Receiver Address is: ");
+    PRINT6ADDR(receiver_addr);
+    PRINTF("\n");
+
+    for (uint8_t i = 0; i < len; i++)
+    {
+        PRINTF("IP Address %d: ", i);
+        PRINT6ADDR(&uip_ds6_if.addr_list[i].ipaddr);
+        PRINTF("\n");
+    }
+
+    for (uint8_t i = 0; i < len; i++)
+    {
+        if (uip_ip6addr_cmp(&uip_ds6_if.addr_list[i].ipaddr, receiver_addr))
+        {
+            PRINTF("IS_THIS_NODE_IN_BLACKLIST: This device is in blacklist!\n");
+            return 1;
+        }
+    }
+
+    PRINTF("IS_THIS_NODE_IN_BLACKLIST: This device is not in blacklist!\n");
+    return 0;
+}
+
+static void add_blacklist_addresses(uip_ipaddr_t *list, uint8_t len)
+{
+    uip_ipaddr_t ipaddr;
+
+    for (uint8_t i = 0; i < len; i++)
+    {
+        uip_ipaddr_copy(&ipaddr, &list[i]);
+        uip_ds6_addr_add(&ipaddr, 0, ADDR_MANUAL);
     }
 }
 
@@ -1159,7 +1198,7 @@ udp_callback(struct simple_udp_connection *c,
             current_ota_info.fw_size = incoming_packet.fw_size;
             current_ota_info.fw_fragment_num = incoming_packet.fw_fragment_num;
             current_ota_info.crc = incoming_packet.crc;
-            memcpy(&current_ota_info.blacklist_nodes,&incoming_packet.blacklist_nodes,(sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES));
+            memcpy(&current_ota_info.blacklist_nodes, &incoming_packet.blacklist_nodes, (sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES));
 
             PRINTF("UDP_CALLBACK: Got OTA response message and set current_ota_info packet. Packet info is: \n");
             print_ota_info_packet_status(&current_ota_info);
@@ -1183,6 +1222,10 @@ udp_callback(struct simple_udp_connection *c,
             PRINTF("OTA_BITMAP AREA BUFFER CONTENT:\n");
             printBufferHex(buf_bitmap, 64);
             PRINTF("\n");
+
+            add_blacklist_addresses(current_ota_info.blacklist_nodes, MAX_BLACKLIST_NODES);
+            // for testing
+            is_this_node_in_blacklist(current_ota_info.blacklist_nodes, MAX_BLACKLIST_NODES, (uip_ipaddr_t *)receiver_addr);
 
             // send ack
             if (prepare_ota_packet(&packet_to_send, OTA_ACK))
@@ -1335,8 +1378,8 @@ PROCESS_THREAD(test_flash_process, ev, data)
     ota_info_flash.fw_fragment_num = (ota_info_flash.fw_size % OTA_MAX_DATA_SIZE) == 0 ? (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) : (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) + 1;
     ota_info_flash.fw_fragment_size = OTA_MAX_DATA_SIZE;
 
-    uip_ip6addr(&blacklist_nodes[0], 0x2001, 0x0db8, 0x85a3, 0, 0, 0x8a2e, 0x0370, 0x7334);
-    uip_ip6addr(&blacklist_nodes[1], 0x2001, 0x0db8, 0x85a3, 0, 0, 0x8a2e, 0x0370, 0x7335);
+    uip_ip6addr(&blacklist_nodes[0], UIP_DS6_DEFAULT_PREFIX, 0x0000, 0x0000, 0x0000, 0x0212, 0x4b00, 0x1ccb, 0x1d17);
+    uip_ip6addr(&blacklist_nodes[1], UIP_DS6_DEFAULT_PREFIX, 0x0000, 0x0000, 0x0000, 0x0212, 0x4b00, 0x1ccb, 0x1d07);
 
     PRINTF("TEST_FLASH_PROCESS: blacklist nodes: \n");
     for (int i = 0; i < MAX_BLACKLIST_NODES; i++)
@@ -1401,13 +1444,12 @@ PROCESS_THREAD(test_flash_process, ev, data)
 
 PROCESS_THREAD(request_process, ev, data)
 {
-    static struct etimer et_request; // request timer, synch timer
+    static struct etimer et_request;     // request timer, synch timer
     static struct etimer et_identify;
-    static struct ota_packet p;                   // init an ota packet
-    static uint8_t udp_buf[PACKET_SIZE];          // get size of ota packet
-    static uint8_t buf_len = 0;                   // buffer len for outgoing packet
-    static rpl_parent_t *parent;                  // parent
-    static const uip_ipaddr_t *parent_ip_address; // Parent IP address
+    static struct ota_packet p;          // init an ota packet
+    static uint8_t udp_buf[PACKET_SIZE]; // get size of ota packet
+    static uint8_t buf_len = 0;          // buffer len for outgoing packet
+    static rpl_parent_t *parent;         // parent
 
     PROCESS_BEGIN();
     PROCESS_PAUSE();
