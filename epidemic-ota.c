@@ -24,7 +24,7 @@
 #define DEBUG DEBUG_PRINT
 #include "net/ip/uip-debug.h"
 
-#define TEST_CLIENT 1
+#define TEST_CLIENT 0
 
 #define UDP_PORT 1234
 #define FLASH_OTA_INFO_ADDR OTA_SYS_ADDR
@@ -50,6 +50,7 @@ static struct ota_info last_ota_info;                       // last ota info
 static struct ctimer update_state_timer;                    // update state callback timer
 static uint16_t current_ota_fragnum;                        // current fragnum for ota
 process_event_t state_request_event;                        // request event variable
+static uint8_t is_ota_to_keep;
 
 /*--------------------------------------------------------------Processes----*/
 
@@ -171,6 +172,21 @@ static void setBit(uint8_t *word, uint16_t index)
     uint8_t mask = 1 << (7 - bitIndex);
 
     word[byteIndex] |= mask;
+}
+
+void convert_to_global_unicast(uip_ipaddr_t *global_addr, uip_ipaddr_t *link_local_addr)
+{
+    // Copy the link-local address to the global address
+    memcpy(global_addr, link_local_addr, sizeof(uip_ipaddr_t));
+
+    // Set the global prefix (e.g., 2001:db8::/64)
+    global_addr->u8[0] = 0xfd;
+    global_addr->u8[1] = 0x00;
+    global_addr->u8[2] = 0x00;
+    global_addr->u8[3] = 0x00;
+
+    // Ensure the rest of the global address is correct (e.g., set the right subnet if necessary)
+    // This part can be customized based on your specific network requirements.
 }
 
 // reads firmware data from given fragnum index as fragsize bytes
@@ -494,6 +510,7 @@ static uint8_t prepare_ota_packet(struct ota_packet *p, uint8_t msg_type)
 
     case OTA_ACK:
         is_packet_prepared = prepare_ota_ack_packet(p, msg_type);
+        break;
 
     case OTA_PACKET_REQUEST:
         is_packet_prepared = prepare_ota_packet_request_packet(p, msg_type);
@@ -925,7 +942,7 @@ static void create_ota_bitmap(uint16_t fw_fragment_num)
     ota_arch_write(fragment_number_buffer, FLASH_OTA_BITMAP_ADDR, current_buffer_len);
 }
 
-static void send_packet_request(struct ota_packet *p)
+static void send_ota_packet(struct ota_packet *p)
 {
     uint8_t buf[PACKET_SIZE];
     uint8_t buf_len = 0;
@@ -1008,7 +1025,7 @@ static void write_program_data_to_flash(struct ota_packet *p)
         PRINTF("\n");
     }
 
-    if (p->fw_fragment_num == current_ota_info.fw_fragment_num - 1)
+    if (p->fw_fragment_num == current_ota_info.fw_fragment_num - 1 && !is_ota_to_keep)
     {
         watchdog_reboot();
     }
@@ -1094,20 +1111,27 @@ static uint8_t is_ota_info_area_empty()
 
 static uint8_t is_this_node_in_blacklist(uip_ipaddr_t *list, uint8_t len, uip_ipaddr_t *receiver_addr)
 {
+    uip_ipaddr_t receiver_temp;
+    uip_ipaddr_copy(&receiver_temp, receiver_addr);
+    receiver_temp.u8[0] = 0xfd;
+    receiver_temp.u8[1] = 0x00;
+    receiver_temp.u8[2] = 0x00;
+    receiver_temp.u8[3] = 0x00;
+
     PRINTF("Receiver Address is: ");
-    PRINT6ADDR(receiver_addr);
+    PRINT6ADDR(&receiver_temp);
     PRINTF("\n");
 
     for (uint8_t i = 0; i < len; i++)
     {
         PRINTF("IP Address %d: ", i);
-        PRINT6ADDR(&uip_ds6_if.addr_list[i].ipaddr);
+        PRINT6ADDR(&list[i]);
         PRINTF("\n");
     }
 
     for (uint8_t i = 0; i < len; i++)
     {
-        if (uip_ip6addr_cmp(&uip_ds6_if.addr_list[i].ipaddr, receiver_addr))
+        if (uip_ip6addr_cmp(&list[i], &receiver_temp))
         {
             PRINTF("IS_THIS_NODE_IN_BLACKLIST: This device is in blacklist!\n");
             return 1;
@@ -1116,17 +1140,6 @@ static uint8_t is_this_node_in_blacklist(uip_ipaddr_t *list, uint8_t len, uip_ip
 
     PRINTF("IS_THIS_NODE_IN_BLACKLIST: This device is not in blacklist!\n");
     return 0;
-}
-
-static void add_blacklist_addresses(uip_ipaddr_t *list, uint8_t len)
-{
-    uip_ipaddr_t ipaddr;
-
-    for (uint8_t i = 0; i < len; i++)
-    {
-        uip_ipaddr_copy(&ipaddr, &list[i]);
-        uip_ds6_addr_add(&ipaddr, 0, ADDR_MANUAL);
-    }
 }
 
 // UDP connection callback handler
@@ -1205,9 +1218,9 @@ udp_callback(struct simple_udp_connection *c,
 
             if (compare_firmware_version(incoming_packet.fw_version) == 0)
             {
-                write_ota_info_to_flash(&current_ota_info);                 // write ota info to flash
                 create_ota_bitmap(current_ota_info.fw_fragment_num);        // create bitmap for ota
                 ota_arch_erase(FLASH_OTA_DATA_ADDR, last_ota_info.fw_size); // erase last ota data
+                write_ota_info_to_flash(&current_ota_info);                 // write ota info to flash
             }
 
             uint8_t buf_info[64];
@@ -1223,9 +1236,7 @@ udp_callback(struct simple_udp_connection *c,
             printBufferHex(buf_bitmap, 64);
             PRINTF("\n");
 
-            add_blacklist_addresses(current_ota_info.blacklist_nodes, MAX_BLACKLIST_NODES);
-            // for testing
-            is_this_node_in_blacklist(current_ota_info.blacklist_nodes, MAX_BLACKLIST_NODES, (uip_ipaddr_t *)receiver_addr);
+            is_ota_to_keep = is_this_node_in_blacklist(current_ota_info.blacklist_nodes, MAX_BLACKLIST_NODES, (uip_ipaddr_t *)receiver_addr);
 
             // send ack
             if (prepare_ota_packet(&packet_to_send, OTA_ACK))
@@ -1444,22 +1455,21 @@ PROCESS_THREAD(test_flash_process, ev, data)
 
 PROCESS_THREAD(request_process, ev, data)
 {
-    static struct etimer et_request;     // request timer, synch timer
-    static struct etimer et_identify;
+    static struct etimer et_request;
+    static struct etimer et_auth;
+    static struct etimer et_allocate;
     static struct ota_packet p;          // init an ota packet
-    static uint8_t udp_buf[PACKET_SIZE]; // get size of ota packet
-    static uint8_t buf_len = 0;          // buffer len for outgoing packet
     static rpl_parent_t *parent;         // parent
 
     PROCESS_BEGIN();
     PROCESS_PAUSE();
 
     // set synch timer and wait until node is synchronized.
-    etimer_set(&et_identify, AUTHENTICATION_INTERVAL * CLOCK_SECOND);
+    etimer_set(&et_auth, AUTHENTICATION_INTERVAL * CLOCK_SECOND);
     while (!foure_control.authenticated || default_instance == NULL || default_instance->current_dag->preferred_parent == NULL)
     {
-        PROCESS_WAIT_UNTIL(etimer_expired(&et_identify));
-        etimer_reset(&et_identify);
+        PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et_auth));
+        etimer_reset(&et_auth);
         PRINTF("waiting to synch...\n");
     }
 
@@ -1472,26 +1482,18 @@ PROCESS_THREAD(request_process, ev, data)
     PRINT6ADDR(parent_ip_address);
     PRINTF("\n");
 
-    etimer_set(&et_identify, AUTHENTICATION_INTERVAL * CLOCK_SECOND);
+    etimer_set(&et_allocate, AUTHENTICATION_INTERVAL * CLOCK_SECOND);
     while (nbr_cell_table_get_cell_num((linkaddr_t *)rpl_get_parent_lladdr(default_instance->current_dag->preferred_parent), SLOT_TYPE_TRANSMIT, SLOT_UNLOCK, 0) < 1)
     {
-        PROCESS_WAIT_UNTIL(etimer_expired(&et_identify));
-        etimer_reset(&et_identify);
+        PRINTF("1\n");
+        PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et_allocate));
+        etimer_reset(&et_allocate);
         PRINTF("waiting to allocate...\n");
+        watchdog_periodic();
+        PRINTF("2\n");
     }
 
-    etimer_set(&et_identify, 10 * CLOCK_SECOND);
-    while (1)
-    {
-        PROCESS_YIELD();
-        if (etimer_expired(&et_identify) && foure_control.synched)
-        {
-            break;
-        }
-        PRINTF("synching...\n");
-        etimer_set(&et_identify, 10 * CLOCK_SECOND);
-    }
-    PRINTF("synched!\n");
+    PRINTF("allocated!\n");
 
     // set the UDP connection with port UDP_PORT, check if the connection is available, if not, exit from process.
     if (!simple_udp_register(&udp_conn, UIP_HTONS(UDP_PORT), NULL, UIP_HTONS(UDP_PORT), udp_callback))
@@ -1508,28 +1510,17 @@ PROCESS_THREAD(request_process, ev, data)
     etimer_set(&et_request, REQUEST_SEND_INTERVAL * CLOCK_SECOND);
     while (1)
     {
+        PRINTF("REQUEST_PROCESS: HELLO WORLD FROM REQUEST PROCESS\n");
+        PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et_request));
+        etimer_reset(&et_request);
+
         // control device ota_process_state, if ota_process_state is request, send request to parent
         if (ota_process_state == STATE_REQUEST)
         {
             // prepare request message, control if packet is prepared, if not, dont send packet
             if (prepare_ota_packet(&p, OTA_REQUEST))
             {
-                buf_len = create_ota_packet(udp_buf, PACKET_SIZE, &p);
-                // if packed is prepared, init a buffer of size ota packet and fill it with packet data, control if packet created, if not dont send packet
-                if (buf_len > 0)
-                {
-                    PRINTF("REQUEST_PROCESS: Packet created. Packet is:\n");
-                    printBufferHex(udp_buf, buf_len);
-                    PRINTF("\n");
-                    PRINTF("REQUEST_PROCESS: Packet is created with %d size. Sending to ", buf_len);
-                    PRINT6ADDR(parent_ip_address);
-                    PRINTF("\n");
-
-                    // send packet
-                    simple_udp_sendto(&udp_conn, udp_buf, buf_len + 1, parent_ip_address);
-                }
-                else
-                    PRINTF("REQUEST_PROCESS: packet cannot created!\n");
+                send_ota_packet(&p);
             }
             else
                 PRINTF("REQUEST_PROCESS: packet cannot prepared!\n");
@@ -1547,10 +1538,6 @@ PROCESS_THREAD(request_process, ev, data)
         {
             PRINTF("REQUEST_PROCESS: Unsupported state for request process!\n");
         }
-
-        PRINTF("REQUEST_PROCESS: HELLO WORLD FROM REQUEST PROCESS\n");
-        PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et_request));
-        etimer_reset(&et_request);
     }
 
     PROCESS_END();
@@ -1574,7 +1561,7 @@ PROCESS_THREAD(update_process, ev, data)
             PRINTF("UPDATE_PROCESS:state is STATE_UPDATE_CLIENT. Sending packet...\n");
             if (prepare_ota_packet(&p, OTA_PACKET_REQUEST))
             {
-                send_packet_request(&p);
+                send_ota_packet(&p);
             }
         }
         else if (ota_process_state == STATE_UPDATE_SERVER)

@@ -10,7 +10,7 @@
 // enable time synch
 #define TSCH_TIME_SYNCH 1
 // authenticate interval time
-#define AUTHENTICATION_INTERVAL 10
+#define AUTHENTICATION_INTERVAL 5
 // max number of nodes that a node can update
 #define MAX_OTA_CELL 1
 // packet request interval time
