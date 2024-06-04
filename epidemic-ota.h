@@ -12,7 +12,7 @@
 // authenticate interval time
 #define AUTHENTICATION_INTERVAL 5
 // max number of nodes that a node can update
-#define MAX_OTA_CELL 1
+#define MAX_OTA_CELL 2
 // packet request interval time
 #define PACKET_REQUEST_INTERVAL 15
 // crc size
@@ -25,7 +25,6 @@ enum ota_message_types
 {
     OTA_REQUEST = 0x01,
     OTA_RESPONSE = 0X02,
-    OTA_ACK = 0x03,
     OTA_PACKET_REQUEST = 0x04,
     OTA_DATA_PACKET = 0x05,
 };
@@ -54,6 +53,7 @@ struct ota_packet
     uint16_t fw_fragment_num;
     uint8_t fw_fragment_size;
     uint32_t crc;
+    uint8_t is_new_ota;
     uip_ipaddr_t blacklist_nodes[MAX_BLACKLIST_NODES];
     struct ota_data data;
 };
