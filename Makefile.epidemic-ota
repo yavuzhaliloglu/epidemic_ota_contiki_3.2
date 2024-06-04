@@ -1,1 +1,2 @@
 epidemic-ota_src = epidemic-ota.c
+epidemic-ota_dsc = crc32.c

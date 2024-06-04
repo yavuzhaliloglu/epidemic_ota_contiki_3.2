@@ -12,6 +12,7 @@
 #include "net/rpl/rpl-private.h"
 #include "sys/etimer.h"
 #include "sys/ctimer.h"
+#include "crc32.h"
 
 #include "dev/flash.h"
 #include "dev/rom-util.h"
@@ -24,7 +25,7 @@
 #define DEBUG DEBUG_PRINT
 #include "net/ip/uip-debug.h"
 
-#define TEST_CLIENT 0
+#define TEST_CLIENT 1
 
 #define UDP_PORT 1234
 #define FLASH_OTA_INFO_ADDR OTA_SYS_ADDR
@@ -1025,9 +1026,21 @@ static void write_program_data_to_flash(struct ota_packet *p)
         PRINTF("\n");
     }
 
-    if (p->fw_fragment_num == current_ota_info.fw_fragment_num - 1 && !is_ota_to_keep)
+    if (p->fw_fragment_num == current_ota_info.fw_fragment_num - 1)
     {
-        watchdog_reboot();
+        PRINTF("FIRMWARE_PROGRAM_DATA_TO_FLASH: all packets are received.\n");
+        if (crc32(0, (const void *)FLASH_OTA_DATA_ADDR, current_ota_info.fw_size, 0) == current_ota_info.crc)
+        {
+            PRINTF("FIRMWARE_PROGRAM_DATA_TO_FLASH: CRC true!\n");
+        }
+        else
+        {
+            PRINTF("FIRMWARE_PROGRAM_DATA_TO_FLASH: CRC false!\n");
+        }
+        if (!is_ota_to_keep)
+        {
+            watchdog_reboot();
+        }
     }
 }
 
@@ -1384,13 +1397,13 @@ PROCESS_THREAD(test_flash_process, ev, data)
 
 #if !TEST_CLIENT
     ota_info_flash.fw_version = 2;
-    ota_info_flash.crc = 1;
+    ota_info_flash.crc = crc32(0, (const void *)FLASH_OTA_DATA_ADDR, 200, 0);
     ota_info_flash.fw_size = 200;
     ota_info_flash.fw_fragment_num = (ota_info_flash.fw_size % OTA_MAX_DATA_SIZE) == 0 ? (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) : (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) + 1;
     ota_info_flash.fw_fragment_size = OTA_MAX_DATA_SIZE;
 
-    uip_ip6addr(&blacklist_nodes[0], UIP_DS6_DEFAULT_PREFIX, 0x0000, 0x0000, 0x0000, 0x0212, 0x4b00, 0x1ccb, 0x1d17);
-    uip_ip6addr(&blacklist_nodes[1], UIP_DS6_DEFAULT_PREFIX, 0x0000, 0x0000, 0x0000, 0x0212, 0x4b00, 0x1ccb, 0x1d07);
+    uip_ip6addr(&blacklist_nodes[0], UIP_DS6_DEFAULT_PREFIX, 0x0000, 0x0000, 0x0000, 0x0212, 0x4b00, 0x1ccb, 0x1d16);
+    uip_ip6addr(&blacklist_nodes[1], UIP_DS6_DEFAULT_PREFIX, 0x0000, 0x0000, 0x0000, 0x0212, 0x4b00, 0x1ccb, 0x1d05);
 
     PRINTF("TEST_FLASH_PROCESS: blacklist nodes: \n");
     for (int i = 0; i < MAX_BLACKLIST_NODES; i++)
@@ -1411,7 +1424,7 @@ PROCESS_THREAD(test_flash_process, ev, data)
     }
 #else
     ota_info_flash.fw_version = 1;
-    ota_info_flash.crc = 1;
+    ota_info_flash.crc = crc32(0, (const void *)FLASH_OTA_DATA_ADDR, 100, 0);
     ota_info_flash.fw_size = 100;
     ota_info_flash.fw_fragment_num = (ota_info_flash.fw_size % OTA_MAX_DATA_SIZE) == 0 ? (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) : (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) + 1;
     ota_info_flash.fw_fragment_size = OTA_MAX_DATA_SIZE;
@@ -1458,8 +1471,8 @@ PROCESS_THREAD(request_process, ev, data)
     static struct etimer et_request;
     static struct etimer et_auth;
     static struct etimer et_allocate;
-    static struct ota_packet p;          // init an ota packet
-    static rpl_parent_t *parent;         // parent
+    static struct ota_packet p;  // init an ota packet
+    static rpl_parent_t *parent; // parent
 
     PROCESS_BEGIN();
     PROCESS_PAUSE();
@@ -1468,7 +1481,7 @@ PROCESS_THREAD(request_process, ev, data)
     etimer_set(&et_auth, AUTHENTICATION_INTERVAL * CLOCK_SECOND);
     while (!foure_control.authenticated || default_instance == NULL || default_instance->current_dag->preferred_parent == NULL)
     {
-        PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et_auth));
+        PROCESS_WAIT_UNTIL(etimer_expired(&et_auth));
         etimer_reset(&et_auth);
         PRINTF("waiting to synch...\n");
     }
@@ -1483,14 +1496,11 @@ PROCESS_THREAD(request_process, ev, data)
     PRINTF("\n");
 
     etimer_set(&et_allocate, AUTHENTICATION_INTERVAL * CLOCK_SECOND);
-    while (nbr_cell_table_get_cell_num((linkaddr_t *)rpl_get_parent_lladdr(default_instance->current_dag->preferred_parent), SLOT_TYPE_TRANSMIT, SLOT_UNLOCK, 0) < 1)
+    while (nbr_cell_table_get_cell_num((linkaddr_t *)rpl_get_parent_lladdr(parent), SLOT_TYPE_TRANSMIT, SLOT_UNLOCK, 0) < 1)
     {
-        PRINTF("1\n");
-        PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et_allocate));
+        PROCESS_WAIT_UNTIL(etimer_expired(&et_allocate));
         etimer_reset(&et_allocate);
         PRINTF("waiting to allocate...\n");
-        watchdog_periodic();
-        PRINTF("2\n");
     }
 
     PRINTF("allocated!\n");
@@ -1511,7 +1521,7 @@ PROCESS_THREAD(request_process, ev, data)
     while (1)
     {
         PRINTF("REQUEST_PROCESS: HELLO WORLD FROM REQUEST PROCESS\n");
-        PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et_request));
+        PROCESS_WAIT_UNTIL(etimer_expired(&et_request));
         etimer_reset(&et_request);
 
         // control device ota_process_state, if ota_process_state is request, send request to parent
