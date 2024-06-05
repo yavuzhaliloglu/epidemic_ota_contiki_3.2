@@ -21,11 +21,10 @@
 
 /*----------------------------------------------------------------Defines----*/
 
-// TODO: paket yollanma esnasında update process timer'ı durdurulacak
 #define DEBUG DEBUG_PRINT
 #include "net/ip/uip-debug.h"
 
-#define TEST_CLIENT 1
+#define TEST_CLIENT 0
 
 #define UDP_PORT 1234
 #define FLASH_OTA_INFO_ADDR OTA_SYS_ADDR
@@ -41,16 +40,16 @@
 
 /*--------------------------------------------------------------Variables----*/
 
-static struct simple_udp_connection udp_conn;               // UDP connection variable
-static uip_ipaddr_t *parent_ip_address;                     // Parent IP address
-static enum device_state ota_process_state = STATE_REQUEST; // Device ota_process_state
-static uint8_t ota_cell_num = 0;                            // Current ota process activated node count
-static uip_ipaddr_t updating_device_list[MAX_OTA_CELL];     // current updating device list
-static struct ota_info current_ota_info;                    // current ota info
-static struct ota_info last_ota_info;                       // last ota info
-static struct ctimer update_state_timer;                    // update state callback timer
-static uint16_t current_ota_fragnum;                        // current fragnum for ota
-process_event_t state_request_event;                        // request event variable
+static struct simple_udp_connection udp_conn;                  // UDP connection variable
+static uip_ipaddr_t *parent_ip_address;                        // Parent IP address
+static enum device_state ota_process_state = STATE_REQUEST;    // Device ota_process_state
+static uint8_t ota_cell_num = 0;                               // Current ota process activated node count
+static uip_ipaddr_t accepted_device_list[MAX_OTA_CELL];        // current updating device list
+static struct ota_info current_ota_info;                       // current ota info
+static struct ota_info last_ota_info;                          // last ota info
+static struct ctimer update_state_timer;                       // update state callback timer
+static uint16_t current_ota_fragnum;                           // current fragnum for ota
+process_event_t state_request_event;                           // request event variable
 static uint8_t is_ota_to_keep;
 
 /*--------------------------------------------------------------Processes----*/
@@ -58,8 +57,6 @@ static uint8_t is_ota_to_keep;
 PROCESS(request_process, "Epidemic Routing Request Process");
 PROCESS(update_process, "Epidemic Routing Update Process");
 PROCESS(test_flash_process, "Flash Process For Testing");
-
-AUTOSTART_PROCESSES(&test_flash_process);
 
 /*--------------------------------------------------------------Functions----*/
 
@@ -107,7 +104,7 @@ static void print_packet_status(struct ota_packet *p)
     if (p->msg_type == OTA_RESPONSE)
         PRINTF("PRINT_PACKET_STATUS: p->fw_fragment_size: %d\n", p->fw_fragment_size);
     if (p->msg_type == OTA_RESPONSE)
-        PRINTF("PRINT_PACKET_STATUS: p->crc: %ld\n", p->crc);
+        PRINTF("PRINT_PACKET_STATUS: p->crc: %lu\n", p->crc);
     if (p->msg_type == OTA_RESPONSE)
     {
         PRINTF("PRINT_PACKET_STATUS: p->blacklist nodes: \n");
@@ -120,21 +117,23 @@ static void print_packet_status(struct ota_packet *p)
         printBufferHex(p->data.buf, p->data.len);
         PRINTF("\n");
     }
+    PRINTF("\n");
 }
 
+// prints ota INFO packet status
 static void print_ota_info_packet_status(struct ota_info *p)
 {
     PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->fw_version: %ld\n", p->fw_version);
-    PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->crc: %ld\n", p->crc);
+    PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->crc: %lu\n", p->crc);
     PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->fw_size: %ld\n", p->fw_size);
     PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->fw_fragment_num: %d\n", p->fw_fragment_num);
     PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->fw_fragment_size: %d\n", p->fw_fragment_size);
     PRINTF("PRINT_OTA_INFO_PACKET_STATUS: p->blacklist_nodes: \n");
     for (int i = 0; i < MAX_BLACKLIST_NODES; i++)
     {
-        printf("IP Address %d: ", i);
+        PRINTF("IP Address %d: ", i);
         uip_debug_ipaddr_print(&p->blacklist_nodes[i]);
-        printf("\n");
+        PRINTF("\n");
     }
     PRINTF("\n");
 }
@@ -153,7 +152,7 @@ static uint8_t reverseBits(uint8_t byte)
     return reversed;
 }
 
-// finds zero bit in a byte
+// finds zero bit in given byte
 static int8_t findZeroBit(uint8_t byte)
 {
     for (int8_t i = 7; i >= 0; i--)
@@ -177,21 +176,6 @@ static void setBit(uint8_t *word, uint16_t index)
     word[byteIndex] |= mask;
 }
 
-void convert_to_global_unicast(uip_ipaddr_t *global_addr, uip_ipaddr_t *link_local_addr)
-{
-    // Copy the link-local address to the global address
-    memcpy(global_addr, link_local_addr, sizeof(uip_ipaddr_t));
-
-    // Set the global prefix (e.g., 2001:db8::/64)
-    global_addr->u8[0] = 0xfd;
-    global_addr->u8[1] = 0x00;
-    global_addr->u8[2] = 0x00;
-    global_addr->u8[3] = 0x00;
-
-    // Ensure the rest of the global address is correct (e.g., set the right subnet if necessary)
-    // This part can be customized based on your specific network requirements.
-}
-
 // reads firmware data from given fragnum index as fragsize bytes
 static void get_firmware_data(uint8_t *buf, uint16_t fragnum, uint8_t fragsize)
 {
@@ -203,12 +187,11 @@ static void get_firmware_data(uint8_t *buf, uint16_t fragnum, uint8_t fragsize)
 }
 
 // Function to add an IP address to the list
-void add_ip_to_list(uip_ipaddr_t *list, uip_ipaddr_t *new_ip, uint8_t *list_size)
+static void add_ip_to_list(uip_ipaddr_t *list, uip_ipaddr_t *new_ip, uint8_t list_size)
 {
-    if (*list_size < MAX_OTA_CELL)
+    if (list_size < MAX_OTA_CELL)
     {
-        list[*list_size] = *new_ip;
-        (*list_size)++;
+        list[list_size] = *new_ip;
     }
     else
     {
@@ -219,18 +202,21 @@ void add_ip_to_list(uip_ipaddr_t *list, uip_ipaddr_t *new_ip, uint8_t *list_size
 // finds first 0 bit in bitmap and returns index of that bit
 static int find_packet_number(struct ota_info *p)
 {
-    uint8_t bitmap_word_buf[FLASH_WORD_SIZE];
-    uint16_t current_ota_bitmap_length = p->fw_fragment_num;
+    uint8_t bitmap_word_buf[FLASH_WORD_SIZE];                // word buffer to keep a word to search inside of that buffer
+    uint16_t current_ota_bitmap_length = p->fw_fragment_num; // total bitmap length for given ota info
     uint16_t word_index = 0;
     uint8_t byte_index = 0;
     int8_t bit_index = 0;
     uint16_t packet_num = 0;
     uint8_t bit_found_flag = 0;
 
+    // find first 0 bit in given word buffer
     while (word_index <= (current_ota_bitmap_length / (FLASH_WORD_SIZE * 8)))
     {
+        // read word from flash
         ota_arch_read(bitmap_word_buf, FLASH_OTA_BITMAP_ADDR + (word_index * FLASH_WORD_SIZE), FLASH_WORD_SIZE);
 
+        // find 0 bit
         for (uint8_t byte_num = 0; byte_num < FLASH_WORD_SIZE; byte_num++)
         {
             bit_index = findZeroBit(bitmap_word_buf[byte_num]);
@@ -244,6 +230,7 @@ static int find_packet_number(struct ota_info *p)
             watchdog_periodic();
         }
 
+        // if 0 bit is found, break
         if (bit_found_flag)
         {
             break;
@@ -253,6 +240,7 @@ static int find_packet_number(struct ota_info *p)
         watchdog_periodic();
     }
 
+    // if bit cannot found in bitmap, return -1, if exist, return index of that bit
     if (bit_index == -1)
     {
         PRINTF("FIND_PACKET_NUMBER: Packet cannot found in bitmap.\n");
@@ -300,13 +288,13 @@ static uint8_t compare_firmware_version(uint32_t fw_version)
 }
 
 // returns index of ip address in update device list
-static uint8_t find_address_index_in_updating_device_list(uip_ipaddr_t *ipaddr)
+static uint8_t find_address_index_in_accepted_device_list(uip_ipaddr_t *ipaddr)
 {
     uint8_t list_idx = 0;
 
     while (list_idx < MAX_OTA_CELL)
     {
-        if (uip_ip6addr_cmp(&updating_device_list[list_idx], ipaddr))
+        if (uip_ip6addr_cmp(&accepted_device_list[list_idx], ipaddr))
         {
             PRINTF("FIND_ADDRESS_INDEX_IN_UPDATE_DEVICE_LIST: This device is already in updating list!\n");
             break;
@@ -314,42 +302,46 @@ static uint8_t find_address_index_in_updating_device_list(uip_ipaddr_t *ipaddr)
 
         list_idx++;
     }
-    PRINTF("FIND_ADDRESS_INDEX_IN_UPDATE_DEVICE_LIST: This device is not in updating list!\n");
+
+    if (list_idx == MAX_OTA_CELL)
+    {
+        PRINTF("FIND_ADDRESS_INDEX_IN_UPDATE_DEVICE_LIST: This device is not in updating list!\n");
+    }
     return list_idx;
 }
 
 // clears content of updating device list array
-static void clear_updating_device_list()
+static void clear_accepted_device_list()
 {
     uint8_t lst_idx = 0;
 
     for (lst_idx = 0; lst_idx < MAX_OTA_CELL; lst_idx++)
     {
-        uip_create_unspecified(&updating_device_list[lst_idx]);
+        uip_create_unspecified(&accepted_device_list[lst_idx]);
     }
 
     PRINTF("CLEAR_UPDATING_DEVICE_LIST: All entries have been cleaned.\n");
 }
 
 // removes an ip address from updating device list
-static uint8_t remove_ipaddr_from_updating_device_list(uip_ipaddr_t *ipaddr)
+static uint8_t remove_ipaddress_from_accepted_device_list(uip_ipaddr_t *ipaddr)
 {
     uint8_t lst_idx = 0;
 
     while (lst_idx < MAX_OTA_CELL)
     {
-        if (uip_ip6addr_cmp(&updating_device_list[lst_idx], ipaddr))
+        if (uip_ip6addr_cmp(&accepted_device_list[lst_idx], ipaddr))
         {
             PRINTF("REMOVE_IPADDR_FROM_UPDATING_DEVICE_LIST: This address is in updating list!\n");
 
             // Move the last element to the current position
             if (lst_idx != MAX_OTA_CELL - 1)
             {
-                updating_device_list[lst_idx] = updating_device_list[MAX_OTA_CELL - 1];
+                accepted_device_list[lst_idx] = accepted_device_list[MAX_OTA_CELL - 1];
             }
 
             // Clear the last element (optional but recommended)
-            uip_create_unspecified(&updating_device_list[MAX_OTA_CELL - 1]);
+            uip_create_unspecified(&accepted_device_list[MAX_OTA_CELL - 1]);
 
             PRINTF("REMOVE_IPADDR_FROM_UPDATING_DEVICE_LIST: removing process completed.\n");
             return 1;
@@ -370,6 +362,7 @@ static uint8_t prepare_ota_request_packet(struct ota_packet *p, uint8_t msg_type
     p->fw_version = last_ota_info.fw_version;
     p->is_new_ota = is_bitmap_full();
 
+    // check if packet is valid
     if (p->msg_type && p->fw_version && (p->is_new_ota == 1 || p->is_new_ota == 0))
     {
         return 1;
@@ -442,7 +435,6 @@ static uint8_t prepare_ota_data_packet(struct ota_packet *p, uint8_t msg_type)
     memcpy(p->data.buf, buf, current_ota_info.fw_fragment_size);
     p->data.len = current_ota_info.fw_fragment_size;
 
-    // TODO: data kontrolü de ekle
     if (p->msg_type && p->fw_version && p->fw_fragment_num >= 0 && p->fw_fragment_num <= current_ota_info.fw_fragment_num)
     {
         return 1;
@@ -947,7 +939,6 @@ static void copy_ota_info(struct ota_info *dest, struct ota_info *src)
     memcpy(&dest->blacklist_nodes, &src->blacklist_nodes, (sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES));
 }
 
-// silme kısmı düzeltilecek
 static void write_program_data_to_flash(struct ota_packet *p)
 {
     if (p->msg_type == OTA_DATA_PACKET && p->fw_fragment_num >= 0 && p->fw_fragment_num < current_ota_info.fw_fragment_num)
@@ -994,8 +985,9 @@ static void write_program_data_to_flash(struct ota_packet *p)
 
     if (p->fw_fragment_num == current_ota_info.fw_fragment_num - 1)
     {
+        PRINTF("WRITE_PROGRAM_DATA_TO_FLASH: current_ota_info.fw_size: %lu\n", current_ota_info.fw_size);
         uint32_t crc = crc32(0, (const void *)FLASH_OTA_DATA_ADDR, current_ota_info.fw_size, 0);
-        PRINTF("WRITE_PROGRAM_DATA_TO_FLASH: Calculated CRC is: %ld\n",crc);
+        PRINTF("WRITE_PROGRAM_DATA_TO_FLASH: Calculated CRC is: %lu\n", crc);
         if (crc == current_ota_info.crc)
         {
             PRINTF("WRITE_PROGRAM_DATA_TO_FLASH: CRC true!\n");
@@ -1011,6 +1003,7 @@ static void write_program_data_to_flash(struct ota_packet *p)
     }
 }
 
+// callback for update ctimer, copy last_ota_info to current_ota_info, restart ctimer, set ota_cell_num to 0
 static void update_ctimer_callback()
 {
     PRINTF("Update Ctimer expired!\n");
@@ -1021,7 +1014,7 @@ static void update_ctimer_callback()
     }
     else
     {
-        clear_updating_device_list();
+        clear_accepted_device_list();
     }
 
     ota_cell_num = 0;
@@ -1042,6 +1035,7 @@ static void reset_update_ctimer()
     ctimer_restart(&update_state_timer);
 }
 
+// init variables, read ota info from flash, set last_ota_info
 static void init_variables()
 {
     uint8_t ota_area_buf[256];
@@ -1067,6 +1061,7 @@ static void init_variables()
     print_ota_info_packet_status(&last_ota_info);
 }
 
+// check if ota info area is empty, return 1 if empty, 0 if not
 static uint8_t is_ota_info_area_empty()
 {
     uint8_t ota_area_buf[256];
@@ -1089,6 +1084,7 @@ static uint8_t is_ota_info_area_empty()
     }
 }
 
+// check if this node is in blacklist, return 1 if in, 0 if not
 static uint8_t is_this_node_in_blacklist(uip_ipaddr_t *list, uint8_t len, uip_ipaddr_t *receiver_addr)
 {
     uip_ipaddr_t receiver_temp;
@@ -1151,14 +1147,14 @@ udp_callback(struct simple_udp_connection *c,
     case OTA_REQUEST:
         PRINTF("UDP_CALLBACK: Incoming packet type is OTA_REQUEST.\n");
 
-        list_idx = find_address_index_in_updating_device_list((uip_ipaddr_t *)sender_addr);
+        list_idx = find_address_index_in_accepted_device_list((uip_ipaddr_t *)sender_addr);
 
         if (is_bitmap_full() && list_idx >= MAX_OTA_CELL && ota_cell_num < MAX_OTA_CELL && ota_process_state != STATE_UPDATE_CLIENT)
         {
             if (compare_firmware_version(incoming_packet.fw_version) == 2 || (compare_firmware_version(incoming_packet.fw_version) == 1 && incoming_packet.is_new_ota == 0))
             {
                 list_idx--;
-                add_ip_to_list(updating_device_list, (uip_ipaddr_t *)sender_addr, &list_idx);
+                add_ip_to_list(accepted_device_list, (uip_ipaddr_t *)sender_addr, list_idx);
 
                 ota_cell_num++;
                 copy_ota_info(&current_ota_info, &last_ota_info);
@@ -1232,12 +1228,11 @@ udp_callback(struct simple_udp_connection *c,
         PRINTF("UDP_CALLBACK: Incoming packet type is OTA_PACKET_REQUEST.\n");
         reset_update_ctimer();
 
-        // TODO: Paket bilgisinin kontrolü düzeltilecek (current ota kısmı)
         if (compare_firmware_version(incoming_packet.fw_version) && ota_process_state == STATE_UPDATE_SERVER)
         {
-            if (find_address_index_in_updating_device_list((uip_ipaddr_t *)sender_addr) < MAX_OTA_CELL)
+            if (find_address_index_in_accepted_device_list((uip_ipaddr_t *)sender_addr) < MAX_OTA_CELL)
             {
-                remove_ipaddr_from_updating_device_list((uip_ipaddr_t *)sender_addr);
+                remove_ipaddress_from_accepted_device_list((uip_ipaddr_t *)sender_addr);
             }
 
             current_ota_fragnum = incoming_packet.fw_fragment_num;
@@ -1336,7 +1331,7 @@ PROCESS_THREAD(test_flash_process, ev, data)
 
 #if !TEST_CLIENT
     ota_info_flash.fw_version = 2;
-    ota_info_flash.crc = crc32(0, (const void *)FLASH_OTA_DATA_ADDR, 200, 0);
+    ota_info_flash.crc = crc32(0, (const void *)ota_data, 200, 0);
     ota_info_flash.fw_size = 200;
     ota_info_flash.fw_fragment_num = (ota_info_flash.fw_size % OTA_MAX_DATA_SIZE) == 0 ? (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) : (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) + 1;
     ota_info_flash.fw_fragment_size = OTA_MAX_DATA_SIZE;
@@ -1363,7 +1358,7 @@ PROCESS_THREAD(test_flash_process, ev, data)
     }
 #else
     ota_info_flash.fw_version = 1;
-    ota_info_flash.crc = crc32(0, (const void *)FLASH_OTA_DATA_ADDR, 100, 0);
+    ota_info_flash.crc = crc32(0, (const void *)ota_data, 100, 0);
     ota_info_flash.fw_size = 100;
     ota_info_flash.fw_fragment_num = (ota_info_flash.fw_size % OTA_MAX_DATA_SIZE) == 0 ? (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) : (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) + 1;
     ota_info_flash.fw_fragment_size = OTA_MAX_DATA_SIZE;

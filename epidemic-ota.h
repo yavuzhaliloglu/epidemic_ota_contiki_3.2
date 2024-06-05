@@ -33,7 +33,7 @@ enum ota_message_types
 enum device_state
 {
     STATE_REQUEST = 0x01,
-    STATE_UPDATE_CLIENT = 0X02,
+    STATE_UPDATE_CLIENT = 0x02,
     STATE_UPDATE_SERVER = 0x03,
 };
 
