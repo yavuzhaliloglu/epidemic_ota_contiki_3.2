@@ -6,7 +6,7 @@
 // packet request waiting time threshold
 #define PACKET_REQUEST_THRESHOLD 45
 // max data size for OTA data (min 64 for bitmap)
-#define OTA_MAX_DATA_SIZE 16
+#define OTA_MAX_DATA_SIZE 64
 // enable time synch
 #define TSCH_TIME_SYNCH 1
 // authenticate interval time

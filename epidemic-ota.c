@@ -1,3 +1,42 @@
+/*
+ * Copyright (c) 2017, Mavi Alp Research Limited.
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the Institute nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ *
+ * This file is part of the Contiki operating system.
+ *
+ */
+
+/**
+ * \file
+ *         Epidemic OTA Fimware Upgrade.
+ * \author
+ *         Yavuz Haliloğlu <yavuzhaliloglu00@gmail.com>
+ */
+
 #include "contiki.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,8 +63,6 @@
 #define DEBUG DEBUG_PRINT
 #include "net/ip/uip-debug.h"
 
-#define TEST_CLIENT 0
-
 #define UDP_PORT 1234
 #define FLASH_OTA_INFO_ADDR OTA_SYS_ADDR
 #define FLASH_OTA_BITMAP_ADDR OTA_SYS_ADDR + FLASH_PAGE_SIZE
@@ -40,23 +77,23 @@
 
 /*--------------------------------------------------------------Variables----*/
 
-static struct simple_udp_connection udp_conn;                  // UDP connection variable
-static uip_ipaddr_t *parent_ip_address;                        // Parent IP address
-static enum device_state ota_process_state = STATE_REQUEST;    // Device ota_process_state
-static uint8_t ota_cell_num = 0;                               // Current ota process activated node count
-static uip_ipaddr_t accepted_device_list[MAX_OTA_CELL];        // current updating device list
-static struct ota_info current_ota_info;                       // current ota info
-static struct ota_info last_ota_info;                          // last ota info
-static struct ctimer update_state_timer;                       // update state callback timer
-static uint16_t current_ota_fragnum;                           // current fragnum for ota
-process_event_t state_request_event;                           // request event variable
-static uint8_t is_ota_to_keep;
+static struct simple_udp_connection udp_conn;               // UDP connection variable
+static uip_ipaddr_t *parent_ip_address;                     // Parent IP address
+static enum device_state ota_process_state = STATE_REQUEST; // Device ota_process_state
+static uint8_t ota_cell_num = 0;                            // Current ota process activated node count
+static uip_ipaddr_t accepted_device_list[MAX_OTA_CELL];     // current updating device list
+static struct ota_info current_ota_info;                    // current ota info
+static struct ota_info last_ota_info;                       // last ota info
+static struct ctimer update_state_timer;                    // update state callback timer
+static uint16_t current_ota_fragnum;                        // current fragnum for ota
+process_event_t state_request_event;                        // request event variable
+process_event_t state_update_event;                         // update event variable
+static uint8_t is_ota_to_keep;                              // is ota to keep or not
 
 /*--------------------------------------------------------------Processes----*/
 
 PROCESS(request_process, "Epidemic Routing Request Process");
 PROCESS(update_process, "Epidemic Routing Update Process");
-PROCESS(test_flash_process, "Flash Process For Testing");
 
 /*--------------------------------------------------------------Functions----*/
 
@@ -378,8 +415,8 @@ static uint8_t prepare_ota_response_packet(struct ota_packet *p, uint8_t msg_typ
     p->msg_type = msg_type;
     p->fw_version = last_ota_info.fw_version;
     p->fw_size = last_ota_info.fw_size;
-    p->fw_fragment_num = (last_ota_info.fw_size % OTA_MAX_DATA_SIZE) == 0 ? (last_ota_info.fw_size / OTA_MAX_DATA_SIZE) : (last_ota_info.fw_size / OTA_MAX_DATA_SIZE) + 1;
-    p->fw_fragment_size = OTA_MAX_DATA_SIZE;
+    p->fw_fragment_num = (last_ota_info.fw_size % last_ota_info.fw_fragment_size) == 0 ? (last_ota_info.fw_size / last_ota_info.fw_fragment_size) : (last_ota_info.fw_size / last_ota_info.fw_fragment_size) + 1;
+    p->fw_fragment_size = last_ota_info.fw_fragment_size;
     p->crc = last_ota_info.crc;
     memcpy(&p->blacklist_nodes, &last_ota_info.blacklist_nodes, (sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES));
 
@@ -435,7 +472,7 @@ static uint8_t prepare_ota_data_packet(struct ota_packet *p, uint8_t msg_type)
     memcpy(p->data.buf, buf, current_ota_info.fw_fragment_size);
     p->data.len = current_ota_info.fw_fragment_size;
 
-    if (p->msg_type && p->fw_version && p->fw_fragment_num >= 0 && p->fw_fragment_num <= current_ota_info.fw_fragment_num)
+    if (p->msg_type && p->fw_version && p->fw_fragment_num >= 0 && p->fw_fragment_num <= current_ota_info.fw_fragment_num && p->data.len <= OTA_MAX_DATA_SIZE)
     {
         return 1;
     }
@@ -996,10 +1033,15 @@ static void write_program_data_to_flash(struct ota_packet *p)
         {
             PRINTF("WRITE_PROGRAM_DATA_TO_FLASH: CRC false!\n");
         }
+
         if (!is_ota_to_keep)
         {
             watchdog_reboot();
         }
+    }
+    else
+    {
+        process_post(&update_process, state_update_event, NULL);
     }
 }
 
@@ -1014,6 +1056,10 @@ static void update_ctimer_callback()
     }
     else
     {
+        if (ota_process_state == STATE_UPDATE_SERVER)
+        {
+            process_post(&update_process, state_update_event, NULL);
+        }
         clear_accepted_device_list();
     }
 
@@ -1042,11 +1088,23 @@ static void init_variables()
 
     // read previous ota info from flash
     ota_arch_read(ota_area_buf, FLASH_OTA_INFO_ADDR, 256);
-    PRINTF("INIT_VARIABLES: OTA info buffer after write operation:\n");
+    PRINTF("INIT_VARIABLES: Flash ota info area:\n");
     printBufferHex(ota_area_buf, 256);
     PRINTF("\n");
 
     last_ota_info = ota_parse_info_buf(ota_area_buf, 256);
+
+    // read previous ota info from flash
+    ota_arch_read(ota_area_buf, FLASH_OTA_BITMAP_ADDR, 256);
+    PRINTF("INIT_VARIABLES: Flash ota bitmap area:\n");
+    printBufferHex(ota_area_buf, 256);
+    PRINTF("\n");
+
+    // read previous ota info from flash
+    ota_arch_read(ota_area_buf, FLASH_OTA_DATA_ADDR, 256);
+    PRINTF("INIT_VARIABLES: Flash ota data area:\n");
+    printBufferHex(ota_area_buf, 256);
+    PRINTF("\n");
 
     if (last_ota_info.fw_version == 0xffffffff)
     {
@@ -1059,29 +1117,6 @@ static void init_variables()
 
     PRINTF("INIT_VARIABLES: last_ota_info packet status:\n");
     print_ota_info_packet_status(&last_ota_info);
-}
-
-// check if ota info area is empty, return 1 if empty, 0 if not
-static uint8_t is_ota_info_area_empty()
-{
-    uint8_t ota_area_buf[256];
-
-    // read previous ota info from flash
-    ota_arch_read(ota_area_buf, FLASH_OTA_INFO_ADDR, 256);
-    PRINTF("TEST_FLASH_PROCESS: OTA info buffer after write operation:\n");
-    printBufferHex(ota_area_buf, 256);
-    PRINTF("\n");
-
-    last_ota_info = ota_parse_info_buf(ota_area_buf, 256);
-
-    if (last_ota_info.fw_version == 0xffffffff)
-    {
-        return 1;
-    }
-    else
-    {
-        return 0;
-    }
 }
 
 // check if this node is in blacklist, return 1 if in, 0 if not
@@ -1199,19 +1234,6 @@ udp_callback(struct simple_udp_connection *c,
                 write_ota_info_to_flash(&current_ota_info);                 // write ota info to flash
             }
 
-            uint8_t buf_info[64];
-            uint8_t buf_bitmap[64];
-            ota_arch_read(buf_info, FLASH_OTA_INFO_ADDR, 64);
-            ota_arch_read(buf_bitmap, FLASH_OTA_BITMAP_ADDR, 64);
-
-            PRINTF("OTA_INFO AREA BUFFER CONTENT:\n");
-            printBufferHex(buf_info, 64);
-            PRINTF("\n");
-
-            PRINTF("OTA_BITMAP AREA BUFFER CONTENT:\n");
-            printBufferHex(buf_bitmap, 64);
-            PRINTF("\n");
-
             is_ota_to_keep = is_this_node_in_blacklist(current_ota_info.blacklist_nodes, MAX_BLACKLIST_NODES, (uip_ipaddr_t *)receiver_addr);
 
             start_update_ctimer();
@@ -1278,126 +1300,6 @@ udp_callback(struct simple_udp_connection *c,
     }
 }
 
-/*----------------------------------------------------------Thread(Flash)----*/
-
-PROCESS_THREAD(test_flash_process, ev, data)
-{
-    static struct ota_info ota_info_flash;
-    static uint8_t ota_area_buf[256];
-    static uint8_t cur_len;
-    static uint8_t ota_data[200];
-    static uip_ipaddr_t blacklist_nodes[MAX_BLACKLIST_NODES];
-    PROCESS_BEGIN();
-
-#if !TEST_CLIENT
-    for (uint8_t i = 0; i < 200; i++)
-    {
-        ota_data[i] = i;
-        watchdog_periodic();
-    }
-
-    PRINTF("TEST_FLASH_PROCESS: OTA data:\n");
-    printBufferHex(ota_data, 200);
-    PRINTF("\n");
-#else
-    for (uint8_t i = 0; i < 100; i++)
-    {
-        ota_data[i] = i;
-        watchdog_periodic();
-    }
-
-    PRINTF("TEST_FLASH_PROCESS: OTA data:\n");
-    printBufferHex(ota_data, 100);
-    PRINTF("\n");
-#endif
-
-    // info area debug
-    ota_arch_read(ota_area_buf, FLASH_OTA_INFO_ADDR, 256);
-    PRINTF("TEST_FLASH_PROCESS: OTA info area BEFORE ERASE:\n");
-    printBufferHex(ota_area_buf, 256);
-    PRINTF("\n");
-
-    // bitmap area debug
-    ota_arch_read(ota_area_buf, FLASH_OTA_BITMAP_ADDR, 256);
-    PRINTF("TEST_FLASH_PROCESS: OTA bitmap area BEFORE ERASE:\n");
-    printBufferHex(ota_area_buf, 256);
-    PRINTF("\n");
-
-    // data area debug
-    ota_arch_read(ota_area_buf, FLASH_OTA_DATA_ADDR, 256);
-    PRINTF("TEST_FLASH_PROCESS: OTA data area BEFORE ERASE:\n");
-    printBufferHex(ota_area_buf, 256);
-    PRINTF("\n");
-
-#if !TEST_CLIENT
-    ota_info_flash.fw_version = 2;
-    ota_info_flash.crc = crc32(0, (const void *)ota_data, 200, 0);
-    ota_info_flash.fw_size = 200;
-    ota_info_flash.fw_fragment_num = (ota_info_flash.fw_size % OTA_MAX_DATA_SIZE) == 0 ? (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) : (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) + 1;
-    ota_info_flash.fw_fragment_size = OTA_MAX_DATA_SIZE;
-
-    uip_ip6addr(&blacklist_nodes[0], UIP_DS6_DEFAULT_PREFIX, 0x0000, 0x0000, 0x0000, 0x0212, 0x4b00, 0x1ccb, 0x1d17);
-    uip_ip6addr(&blacklist_nodes[1], UIP_DS6_DEFAULT_PREFIX, 0x0000, 0x0000, 0x0000, 0x0212, 0x4b00, 0x1ccb, 0x1d07);
-
-    PRINTF("TEST_FLASH_PROCESS: blacklist nodes: \n");
-    for (int i = 0; i < MAX_BLACKLIST_NODES; i++)
-    {
-        printf("IP Address %d: ", i);
-        uip_debug_ipaddr_print(&blacklist_nodes[i]);
-        printf("\n");
-    }
-
-    memcpy(&ota_info_flash.blacklist_nodes, &blacklist_nodes, sizeof(uip_ipaddr_t) * MAX_BLACKLIST_NODES);
-
-    PRINTF("TEST_FLASH_PROCESS: ota_info_flash blacklist nodes: \n");
-    for (int i = 0; i < MAX_BLACKLIST_NODES; i++)
-    {
-        printf("IP Address %d: ", i);
-        uip_debug_ipaddr_print(&ota_info_flash.blacklist_nodes[i]);
-        printf("\n");
-    }
-#else
-    ota_info_flash.fw_version = 1;
-    ota_info_flash.crc = crc32(0, (const void *)ota_data, 100, 0);
-    ota_info_flash.fw_size = 100;
-    ota_info_flash.fw_fragment_num = (ota_info_flash.fw_size % OTA_MAX_DATA_SIZE) == 0 ? (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) : (ota_info_flash.fw_size / OTA_MAX_DATA_SIZE) + 1;
-    ota_info_flash.fw_fragment_size = OTA_MAX_DATA_SIZE;
-#endif
-
-    // check the ota info area and if it's empty, fill with ota_info_flash value
-    if (is_ota_info_area_empty())
-    {
-        PRINTF("TEST_FLASH_PROCESS: ota_info_flash packet status:\n");
-        print_ota_info_packet_status(&ota_info_flash);
-
-        // create info buffer and write it into flash
-        cur_len = create_ota_info_buffer(ota_area_buf, sizeof(struct ota_info), &ota_info_flash);
-
-        ota_arch_erase(FLASH_OTA_INFO_ADDR, FLASH_PAGE_SIZE);
-        ota_arch_write(ota_area_buf, FLASH_OTA_INFO_ADDR, cur_len);
-    }
-
-    /*----------------------------------------------------------------------------------------------------------------*/
-
-    ota_arch_erase(FLASH_OTA_DATA_ADDR, FLASH_PAGE_SIZE);
-#if !TEST_CLIENT
-    ota_arch_write(ota_data, FLASH_OTA_DATA_ADDR, 200);
-#else
-    ota_arch_write(ota_data, FLASH_OTA_DATA_ADDR, 100);
-#endif
-
-    init_variables();
-
-    // ota area debug
-    ota_arch_read(ota_area_buf, FLASH_OTA_DATA_ADDR, 256);
-    PRINTF("TEST_FLASH_PROCESS: OTA data area read:\n");
-    printBufferHex(ota_area_buf, 256);
-    PRINTF("\n");
-
-    process_start(&request_process, NULL);
-    PROCESS_END();
-}
-
 /*--------------------------------------------------------Thread(Request)----*/
 
 PROCESS_THREAD(request_process, ev, data)
@@ -1410,6 +1312,9 @@ PROCESS_THREAD(request_process, ev, data)
 
     PROCESS_BEGIN();
     PROCESS_PAUSE();
+
+    PRINTF("OTA SYS ADDR: %08X\n", FLASH_OTA_INFO_ADDR);
+    init_variables();
 
     // set synch timer and wait until node is synchronized.
     etimer_set(&et_auth, AUTHENTICATION_INTERVAL * CLOCK_SECOND);
@@ -1470,7 +1375,7 @@ PROCESS_THREAD(request_process, ev, data)
             PROCESS_WAIT_EVENT_UNTIL(ev == state_request_event);
             etimer_restart(&et_request);
         }
-        // if unsupported state set, yield
+        // if unsupported state set, do nothing
         else
         {
             PRINTF("REQUEST_PROCESS: Unsupported state for request process!\n");
@@ -1516,7 +1421,7 @@ PROCESS_THREAD(update_process, ev, data)
             break;
         }
 
-        PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et_update));
+        PROCESS_WAIT_EVENT_UNTIL(ev == state_update_event);
         PRINTF("UPDATE_PROCESS: HELLO WORLD FROM UPDATE PROCESS\n");
         etimer_reset(&et_update);
     }
@@ -1530,6 +1435,6 @@ PROCESS_THREAD(update_process, ev, data)
 
 void start_epidemic_ota()
 {
-    process_exit(&test_flash_process);
-    process_start(&test_flash_process, NULL);
+    process_exit(&request_process);
+    process_start(&request_process, NULL);
 }
