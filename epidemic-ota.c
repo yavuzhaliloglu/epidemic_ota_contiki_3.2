@@ -93,7 +93,6 @@ static uint8_t is_ota_to_keep;                              // is ota to keep or
 /*--------------------------------------------------------------Processes----*/
 
 PROCESS(request_process, "Epidemic Routing Request Process");
-PROCESS(update_process, "Epidemic Routing Update Process");
 
 /*--------------------------------------------------------------Functions----*/
 
@@ -1041,7 +1040,7 @@ static void write_program_data_to_flash(struct ota_packet *p)
     }
     else
     {
-        process_post(&update_process, state_update_event, NULL);
+        process_post(&request_process, state_update_event, NULL);
     }
 }
 
@@ -1053,16 +1052,18 @@ static void update_ctimer_callback()
     if (ota_process_state == STATE_UPDATE_CLIENT)
     {
         copy_ota_info(&last_ota_info, &current_ota_info);
+        process_post(&request_process, state_update_event, NULL);
     }
     else
     {
         if (ota_process_state == STATE_UPDATE_SERVER)
         {
-            process_post(&update_process, state_update_event, NULL);
+            process_post(&request_process, state_update_event, NULL);
         }
         clear_accepted_device_list();
     }
 
+    ota_process_state = STATE_REQUEST;
     ota_cell_num = 0;
 
     ctimer_restart(&update_state_timer);
@@ -1229,9 +1230,13 @@ udp_callback(struct simple_udp_connection *c,
 
             if (compare_firmware_version(incoming_packet.fw_version) == 0)
             {
-                create_ota_bitmap(current_ota_info.fw_fragment_num);        // create bitmap for ota
-                ota_arch_erase(FLASH_OTA_DATA_ADDR, last_ota_info.fw_size); // erase last ota data
-                write_ota_info_to_flash(&current_ota_info);                 // write ota info to flash
+                create_ota_bitmap(current_ota_info.fw_fragment_num); // create bitmap for ota
+                write_ota_info_to_flash(&current_ota_info);          // write ota info to flash
+                for (uint32_t i = FLASH_OTA_DATA_ADDR; i < FLASH_OTA_DATA_ADDR + last_ota_info.fw_size; i += FLASH_PAGE_SIZE)
+                {
+                    ota_arch_erase(i, FLASH_PAGE_SIZE); // erase last ota data
+                    PRINTF("Deleted 0x%lx\n", i);
+                }
             }
 
             is_ota_to_keep = is_this_node_in_blacklist(current_ota_info.blacklist_nodes, MAX_BLACKLIST_NODES, (uip_ipaddr_t *)receiver_addr);
@@ -1322,7 +1327,7 @@ PROCESS_THREAD(request_process, ev, data)
     {
         PROCESS_WAIT_UNTIL(etimer_expired(&et_auth));
         etimer_reset(&et_auth);
-        PRINTF("waiting to synch...\n");
+        PRINTF("waiting to synch FROM UPDATED PROCESS...\n");
     }
 
     // after the synchronization, get parent from default instance and get it's IP address.
@@ -1338,7 +1343,7 @@ PROCESS_THREAD(request_process, ev, data)
     {
         PROCESS_WAIT_UNTIL(etimer_expired(&et_allocate));
         etimer_reset(&et_allocate);
-        PRINTF("waiting to allocate...\n");
+        PRINTF("waiting to allocate FROM UPDATED PROCESS...\n");
     }
 
     // set the UDP connection with port UDP_PORT, check if the connection is available, if not, exit from process.
@@ -1348,13 +1353,23 @@ PROCESS_THREAD(request_process, ev, data)
         PROCESS_EXIT();
     }
 
-    // set the request timer
     etimer_set(&et_request, REQUEST_SEND_INTERVAL * CLOCK_SECOND);
+    // set the request timer
     while (1)
     {
         PRINTF("REQUEST_PROCESS: HELLO WORLD FROM REQUEST PROCESS\n");
-        PROCESS_WAIT_UNTIL(etimer_expired(&et_request));
-        etimer_reset(&et_request);
+
+        if (ota_process_state == STATE_REQUEST)
+        {
+            PROCESS_WAIT_EVENT_UNTIL(etimer_expired(&et_request));
+        }
+        else
+        {
+            etimer_reset(&et_request);
+            etimer_stop(&et_request);
+            PROCESS_WAIT_EVENT_UNTIL(ev == state_update_event);
+        }
+        etimer_set(&et_request, REQUEST_SEND_INTERVAL * CLOCK_SECOND);
 
         // control device ota_process_state, if ota_process_state is request, send request to parent
         if (ota_process_state == STATE_REQUEST)
@@ -1370,10 +1385,22 @@ PROCESS_THREAD(request_process, ev, data)
         // if ota_process_state is STATE_UPDATE_CLIENT or STATE_UPDATE_SERVER, don't do anything, just wait until ota process ends.
         else if (ota_process_state == STATE_UPDATE_CLIENT || ota_process_state == STATE_UPDATE_SERVER)
         {
-            PRINTF("REQUEST_PROCESS: ota_process_state is %02X. state changing...\n", ota_process_state);
-            process_start(&update_process, NULL);
-            PROCESS_WAIT_EVENT_UNTIL(ev == state_request_event);
-            etimer_restart(&et_request);
+            if (ota_process_state == STATE_UPDATE_CLIENT)
+            {
+                PRINTF("update_process: state is STATE_UPDATE_CLIENT. Sending packet...\n");
+                if (prepare_ota_packet(&p, OTA_PACKET_REQUEST))
+                {
+                    send_ota_packet(&p);
+                }
+            }
+            else if (ota_process_state == STATE_UPDATE_SERVER)
+            {
+                PRINTF("update_process: state is STATE_UPDATE_SERVER. Waiting for packets.\n");
+            }
+            else
+            {
+                PRINTF("UPDATE_PROECSS: Invalid Update Process State!\n");
+            }
         }
         // if unsupported state set, do nothing
         else
@@ -1385,52 +1412,6 @@ PROCESS_THREAD(request_process, ev, data)
     PROCESS_END();
 }
 
-/*---------------------------------------------------------Thread(Update)----*/
-
-PROCESS_THREAD(update_process, ev, data)
-{
-    static struct etimer et_update;
-    static struct ota_packet p;
-
-    PROCESS_BEGIN();
-    PROCESS_PAUSE();
-
-    etimer_set(&et_update, PACKET_REQUEST_INTERVAL * CLOCK_SECOND);
-    while (1)
-    {
-        if (ota_process_state == STATE_UPDATE_CLIENT)
-        {
-            PRINTF("UPDATE_PROCESS:state is STATE_UPDATE_CLIENT. Sending packet...\n");
-            if (prepare_ota_packet(&p, OTA_PACKET_REQUEST))
-            {
-                send_ota_packet(&p);
-            }
-        }
-        else if (ota_process_state == STATE_UPDATE_SERVER)
-        {
-            PRINTF("UPDATE_PROCESS: state is STATE_UPDATE_SERVER. Waiting for packets.\n");
-        }
-        else
-        {
-            PRINTF("UPDATE_PROECSS: Invalid Update Process State!\n");
-            break;
-        }
-
-        if (ota_cell_num == 0)
-        {
-            break;
-        }
-
-        PROCESS_WAIT_EVENT_UNTIL(ev == state_update_event);
-        PRINTF("UPDATE_PROCESS: HELLO WORLD FROM UPDATE PROCESS\n");
-        etimer_reset(&et_update);
-    }
-
-    ota_process_state = STATE_REQUEST;
-    process_post(&request_process, state_request_event, NULL);
-
-    PROCESS_END();
-}
 /*-------------------------------------------------------------------Init----*/
 
 void start_epidemic_ota()

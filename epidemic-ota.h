@@ -12,7 +12,7 @@
 // authenticate interval time
 #define AUTHENTICATION_INTERVAL 5
 // max number of nodes that a node can update
-#define MAX_OTA_CELL 2
+#define MAX_OTA_CELL 4
 // packet request interval time
 #define PACKET_REQUEST_INTERVAL 15
 // crc size
